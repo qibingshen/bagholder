@@ -1,128 +1,100 @@
-# Feature Specification: [FEATURE NAME]
+# 功能规格：[功能名称]
 
-**Feature Branch**: `[###-feature-name]`  
-**Created**: [DATE]  
-**Status**: Draft  
-**Input**: User description: "$ARGUMENTS"
+**功能分支**：`[###-feature-name]`
+**创建日期**：[DATE]
+**状态**：草案
+**输入**：用户描述：“$ARGUMENTS”
 
-## User Scenarios & Testing *(mandatory)*
+## 用户场景与测试（必填）
 
 <!--
-  IMPORTANT: User stories should be PRIORITIZED as user journeys ordered by importance.
-  Each user story/journey must be INDEPENDENTLY TESTABLE - meaning if you implement just ONE of them,
-  you should still have a viable MVP (Minimum Viable Product) that delivers value.
-  
-  Assign priorities (P1, P2, P3, etc.) to each story, where P1 is the most critical.
-  Think of each story as a standalone slice of functionality that can be:
-  - Developed independently
-  - Tested independently
-  - Deployed independently
-  - Demonstrated to users independently
+用户故事按价值排序，每个故事必须能独立验收。项目自行编写的内容必须使用简体中文。
 -->
 
-### User Story 1 - [Brief Title] (Priority: P1)
+### 用户故事 1——[简短标题]（优先级：P1）
 
-[Describe this user journey in plain language]
+[用非技术语言描述用户旅程]
 
-**Why this priority**: [Explain the value and why it has this priority level]
+**优先级理由**：[说明价值和优先级理由]
 
-**Independent Test**: [Describe how this can be tested independently - e.g., "Can be fully tested by [specific action] and delivers [specific value]"]
+**独立验收**：[说明如何独立验证并获得什么价值]
 
-**Acceptance Scenarios**:
+**验收场景**：
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-2. **Given** [initial state], **When** [action], **Then** [expected outcome]
+1. **假如** [初始状态]，**当** [操作]，**那么** [可观察结果]
+2. **假如** [初始状态]，**当** [失败或边界情况]，**那么** [安全结果]
 
 ---
 
-### User Story 2 - [Brief Title] (Priority: P2)
+### 用户故事 2——[简短标题]（优先级：P2）
 
-[Describe this user journey in plain language]
+[用非技术语言描述用户旅程]
 
-**Why this priority**: [Explain the value and why it has this priority level]
+**优先级理由**：[说明价值和优先级理由]
 
-**Independent Test**: [Describe how this can be tested independently]
+**独立验收**：[说明如何独立验证]
 
-**Acceptance Scenarios**:
+**验收场景**：
 
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
-
----
-
-### User Story 3 - [Brief Title] (Priority: P3)
-
-[Describe this user journey in plain language]
-
-**Why this priority**: [Explain the value and why it has this priority level]
-
-**Independent Test**: [Describe how this can be tested independently]
-
-**Acceptance Scenarios**:
-
-1. **Given** [initial state], **When** [action], **Then** [expected outcome]
+1. **假如** [初始状态]，**当** [操作]，**那么** [可观察结果]
 
 ---
 
-[Add more user stories as needed, each with an assigned priority]
+[按需增加用户故事]
 
-### Edge Cases
+### 异常与边界场景
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right edge cases.
--->
+- 数据缺少来源、市场时间、采集时间、版本或已过期时，系统如何拒绝或降级？
+- 跨市场时区、交易日历、停牌、复权或板块成分在预测时点发生变化时如何处理？
+- MCP 工具失败、返回不完整或无法为数字提供溯源时，大模型如何停止数字输出？
+- 后台行情更新、回测或训练失败时，界面和已验证数据如何保持可用？
+- 候选模型任一晋级门禁失败或发布后退化时，系统如何阻止发布或回滚？
 
-- What happens when [boundary condition]?
-- How does system handle [error scenario]?
+## 需求（必填）
 
-## Requirements *(mandatory)*
+### 功能需求
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right functional requirements.
--->
+- **FR-001**：系统 MUST [具体、可验证的能力]
+- **FR-002**：系统 MUST [输入校验、错误处理或失败安全行为]
+- **FR-003**：系统 MUST [数据持久化、版本或审计要求]
 
-### Functional Requirements
+### 宪法约束（必填）
 
-- **FR-001**: System MUST [specific capability, e.g., "allow users to create accounts"]
-- **FR-002**: System MUST [specific capability, e.g., "validate email addresses"]  
-- **FR-003**: Users MUST be able to [key interaction, e.g., "reset their password"]
-- **FR-004**: System MUST [data requirement, e.g., "persist user preferences"]
-- **FR-005**: System MUST [behavior, e.g., "log all security events"]
+- **数据事实与版本**：[列出涉及的数据实体，以及来源、市场时间、采集时间、数据版本、追加或修订规则]
+- **时间边界**：[定义预测时点、数据截止时点、训练/验证/回测切分和防未来数据泄漏验收]
+- **数字来源与预测表达**：[定义 MCP 结果引用；如涉及预测，定义周期、三分类概率、置信度、依据、新鲜度、模型版本和风险因素]
+- **模型生命周期**：[如涉及模型，定义候选、时间序列回测、简单基准、影子运行、人工批准、发布和回滚]
+- **进程与失败隔离**：[如涉及后台任务，定义其与 PySide6 的边界、原子提交和失败恢复]
+- **研究范围**：[确认不连接券商、不保存交易凭据、不执行真实交易]
+- **契约与权限**：[列出 Skill、MCP、内部服务的结构化契约、最小权限、校验、错误、日志和自动化测试]
+- **跨平台**：[定义 Windows、macOS、Linux 的适用行为、集中适配和分别验收]
+- **语言规范**：[确认项目自产文档、注释、文档字符串和示例使用简体中文]
+- **风险提示**：[所有预测界面和报告 MUST 显示“研究参考，不构成投资建议”]
 
-*Example of marking unclear requirements:*
+### 关键实体（涉及数据时必填）
 
-- **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
-- **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+- **[实体名称]**：[含义、关键属性、来源、市场时间、采集时间、数据版本及版本关系]
 
-### Key Entities *(include if feature involves data)*
+## 范围边界（必填）
 
-- **[Entity 1]**: [What it represents, key attributes without implementation]
-- **[Entity 2]**: [What it represents, relationships to other entities]
+### 范围内
 
-## Success Criteria *(mandatory)*
+- [本功能明确交付的研究、模拟或历史验证能力]
 
-<!--
-  ACTION REQUIRED: Define measurable success criteria.
-  These must be technology-agnostic and measurable.
--->
+### 范围外
 
-### Measurable Outcomes
+- 券商连接、券商凭据、真实下单及自动交易。
+- [其他明确不交付的能力]
 
-- **SC-001**: [Measurable metric, e.g., "Users can complete account creation in under 2 minutes"]
-- **SC-002**: [Measurable metric, e.g., "System handles 1000 concurrent users without degradation"]
-- **SC-003**: [User satisfaction metric, e.g., "90% of users successfully complete primary task on first attempt"]
-- **SC-004**: [Business metric, e.g., "Reduce support tickets related to [X] by 50%"]
+## 成功标准（必填）
 
-## Assumptions
+### 可度量结果
 
-<!--
-  ACTION REQUIRED: The content in this section represents placeholders.
-  Fill them out with the right assumptions based on reasonable defaults
-  chosen when the feature description did not specify certain details.
--->
+- **SC-001**：[技术实现无关且可测量的用户结果]
+- **SC-002**：[数据可追溯、时间一致性或故障恢复结果]
+- **SC-003**：[三平台分别可验收的结果]
 
-- [Assumption about target users, e.g., "Users have stable internet connectivity"]
-- [Assumption about scope boundaries, e.g., "Mobile support is out of scope for v1"]
-- [Assumption about data/environment, e.g., "Existing authentication system will be reused"]
-- [Dependency on existing system/service, e.g., "Requires access to the existing user profile API"]
+## 假设与依赖
+
+- [合理默认值及其影响]
+- [获授权的数据源或外部依赖；不得假设存在券商交易能力]

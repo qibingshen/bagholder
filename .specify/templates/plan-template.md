@@ -1,104 +1,71 @@
-# Implementation Plan: [FEATURE]
+# 实施计划：[功能名称]
 
-**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+**分支**：`[###-feature-name]` | **日期**：[DATE] | **规格**：[链接]
+**输入**：`/specs/[###-feature-name]/spec.md` 中的功能规格
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/plan-template.md` for the execution workflow.
+**说明**：本模板由 `/speckit.plan` 填充。项目自行编写的内容必须使用简体中文。
 
-## Summary
+## 摘要
 
-[Extract from feature spec: primary requirement + technical approach from research]
+[从功能规格提取主要需求，并概述技术方案]
 
-## Technical Context
+## 技术上下文
 
-<!--
-  ACTION REQUIRED: Replace the content in this section with the technical details
-  for the project. The structure here is presented in advisory capacity to guide
-  the iteration process.
--->
+**语言/版本**：[例如 Python 3.11，或 NEEDS CLARIFICATION]
+**主要依赖**：[例如 PySide6、DuckDB，或 NEEDS CLARIFICATION]
+**存储**：[本地持久化方案、追加策略、版本策略，或 N/A]
+**测试**：[测试框架及契约、时间一致性、故障和平台测试方案]
+**目标平台**：[Windows、macOS、Linux 的具体支持范围]
+**项目类型**：[例如跨平台桌面应用]
+**性能目标**：[可度量的性能目标]
+**约束**：[离线能力、资源、权限、研究边界等]
+**规模/范围**：[数据量、市场、界面或服务范围]
 
-**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
-**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
-**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
-**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
-**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
-**Project Type**: [e.g., library/cli/web-service/mobile-app/compiler/desktop-app or NEEDS CLARIFICATION]  
-**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
-**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
-**Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
+## 宪法检查
 
-## Constitution Check
+**门禁：Phase 0 研究开始前必须通过，并在 Phase 1 设计完成后重新检查。任一项“不通过”
+或“证据缺失”都必须停止，不得以复杂性说明豁免。**
 
-*GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
+| 编号 | 强制检查 | 结论 | 证据位置 |
+|------|----------|------|----------|
+| C-01 | 行情、板块、特征、预测、实际结果、报告和模型版本均本地持久化，并含来源、市场时间、采集时间和数据版本 | [通过/不适用/阻塞] | [规格、数据模型或契约位置] |
+| C-02 | 训练、验证和回测按时间顺序切分；每项特征有预测时点可用性与未来数据泄漏测试 | [通过/不适用/阻塞] | [设计与测试位置] |
+| C-03 | 大模型仅理解、编排和解释；所有量化数字均引用 MCP 工具结果 | [通过/不适用/阻塞] | [MCP 契约与溯源测试位置] |
+| C-04 | 预测使用指定周期的上涨/震荡/下跌概率，并含置信度、依据、新鲜度、模型版本、风险因素；所有预测界面和报告显示“研究参考，不构成投资建议” | [通过/不适用/阻塞] | [预测契约与界面验收位置] |
+| C-05 | 自学习仅生成候选模型；发布依次通过回测、简单基准、影子运行、人工批准且可回滚 | [通过/不适用/阻塞] | [状态机、审批与回滚证据] |
+| C-06 | 原始行情和预测快照追加保存；修订形成带来源的新版本 | [通过/不适用/阻塞] | [存储约束与版本链测试] |
+| C-07 | 行情更新、回测、训练与 PySide6 隔离，失败不损坏应用或已验证数据 | [通过/不适用/阻塞] | [进程边界、提交协议与故障测试] |
+| C-08 | 第一阶段不连接券商、不保存交易凭据、不执行真实交易 | [通过/不适用/阻塞] | [范围、权限和依赖检查] |
+| C-09 | Skill、MCP、内部服务有结构化契约、最小权限、参数校验、错误处理、日志和自动化测试 | [通过/不适用/阻塞] | [contracts/ 与测试位置] |
+| C-10 | 平台差异集中封装，并为 Windows、macOS、Linux 分别安排验收 | [通过/不适用/阻塞] | [适配层与平台验收位置] |
+| C-11 | 项目文档、注释、文档字符串和示例符合简体中文规范 | [通过/不适用/阻塞] | [检查规则或评审位置] |
 
-[Gates determined based on constitution file]
+## 项目结构
 
-## Project Structure
-
-### Documentation (this feature)
+### 本功能文档
 
 ```text
 specs/[###-feature]/
-├── plan.md              # This file (/speckit.plan command output)
-├── research.md          # Phase 0 output (/speckit.plan command)
-├── data-model.md        # Phase 1 output (/speckit.plan command)
-├── quickstart.md        # Phase 1 output (/speckit.plan command)
-├── contracts/           # Phase 1 output (/speckit.plan command)
-└── tasks.md             # Phase 2 output (/speckit.tasks command - NOT created by /speckit.plan)
+├── plan.md
+├── research.md
+├── data-model.md
+├── quickstart.md
+├── contracts/
+└── tasks.md
 ```
 
-### Source Code (repository root)
-<!--
-  ACTION REQUIRED: Replace the placeholder tree below with the concrete layout
-  for this feature. Delete unused options and expand the chosen structure with
-  real paths (e.g., apps/admin, packages/something). The delivered plan must
-  not include Option labels.
--->
+### 源代码
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
-src/
-├── models/
-├── services/
-├── cli/
-└── lib/
-
-tests/
-├── contract/
-├── integration/
-└── unit/
-
-# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
-backend/
-├── src/
-│   ├── models/
-│   ├── services/
-│   └── api/
-└── tests/
-
-frontend/
-├── src/
-│   ├── components/
-│   ├── pages/
-│   └── services/
-└── tests/
-
-# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
-api/
-└── [same as backend above]
-
-ios/ or android/
-└── [platform-specific structure: feature modules, UI flows, platform tests]
+[填写实际目录结构；删除所有未采用的示例，不得保留“选项”标签]
 ```
 
-**Structure Decision**: [Document the selected structure and reference the real
-directories captured above]
+**结构决策**：[说明所选结构、进程边界、平台适配层和真实目录]
 
-## Complexity Tracking
+## 复杂性跟踪
 
-> **Fill ONLY if Constitution Check has violations that must be justified**
+> 仅记录不违反宪法、但需要额外复杂度的设计。宪法原则不得在此豁免。
 
-| Violation | Why Needed | Simpler Alternative Rejected Because |
-|-----------|------------|-------------------------------------|
-| [e.g., 4th project] | [current need] | [why 3 projects insufficient] |
-| [e.g., Repository pattern] | [specific problem] | [why direct DB access insufficient] |
+| 复杂性 | 必要原因 | 被否决的简单方案及原因 |
+|--------|----------|------------------------|
+| [示例] | [具体原因] | [为什么不足] |
