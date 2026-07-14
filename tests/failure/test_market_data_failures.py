@@ -12,6 +12,13 @@ from stock_agent.adapters.market_data.sina_codes import (
 from stock_agent.domain.market import InstrumentIdentity, Market
 
 
+class 忽略事实记录器:
+    """隔离响应校验测试的记录端口，不替代持久化集成测试。"""
+
+    def record(self, raw_response: bytes, quotes: list[object]) -> None:
+        """响应校验失败路径不会调用该端口。"""
+
+
 def 新浪响应(日期: str, 时间: str) -> bytes:
     """构造字段数量完整的单条新浪响应，供失败边界覆盖使用。"""
 
@@ -56,7 +63,7 @@ def test_新浪适配器拒绝空或非法请求代码(codes: list[str]) -> None
     """请求代码必须已是沪深前缀加六码 ASCII 数字，避免构造越界地址。"""
 
     with pytest.raises(SinaDataSourceError):
-        SinaHttpAdapter(lambda _url: b"").fetch_quotes(codes, datetime.now(UTC))
+        SinaHttpAdapter(lambda _url: b"", 忽略事实记录器()).fetch_quotes(codes, datetime.now(UTC))
 
 
 @pytest.mark.parametrize(
@@ -79,7 +86,7 @@ def test_新浪适配器拒绝异常或不完整响应且不返回部分行情(r
         return response
 
     with pytest.raises(SinaDataSourceError):
-        SinaHttpAdapter(读取行情).fetch_quotes(
+        SinaHttpAdapter(读取行情, 忽略事实记录器()).fetch_quotes(
             ["sh600000"], datetime(2026, 7, 14, 1, 30, tzinfo=UTC)
         )
 
@@ -90,6 +97,6 @@ def test_新浪适配器响应缺少任一请求代码时拒绝全部行情() ->
     response = 新浪响应("2026-07-14", "09:30:00")
 
     with pytest.raises(SinaDataSourceError):
-        SinaHttpAdapter(lambda _url: response).fetch_quotes(
+        SinaHttpAdapter(lambda _url: response, 忽略事实记录器()).fetch_quotes(
             ["sh600000", "sz000001"], datetime(2026, 7, 14, 1, 30, tzinfo=UTC)
         )

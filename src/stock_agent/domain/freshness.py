@@ -20,10 +20,10 @@ def classify_freshness(
 ) -> FreshnessState:
     """按市场时点、采集时点和开市状态返回兼容公共契约的新鲜度。"""
 
+    _validate_times(market_time, collected_at)
+
     if not is_open:
         return "CLOSED"
-
-    _validate_times(market_time, collected_at)
 
     age_seconds = (collected_at - market_time).total_seconds()
     realtime_limit = 5 if market is Market.CN else 15

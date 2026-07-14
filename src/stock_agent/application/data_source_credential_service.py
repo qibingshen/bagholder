@@ -85,6 +85,7 @@ class DataSourceCredentialService:
     def __init__(self, credential_store: CredentialStore) -> None:
         self._credential_store = credential_store
         self._credential_references: dict[str, str] = {}
+        self._pending_revocations: dict[str, str] = {}
 
     def configure(self, registration: CredentialRegistration) -> CredentialAuthorization:
         """仅通过系统钥匙串配置 Finnhub，并返回不含引用的授权状态。"""
@@ -93,9 +94,7 @@ class DataSourceCredentialService:
         if not isinstance(self._credential_store, KeyringCredentialStore):
             raise ValueError("Finnhub 凭据必须使用系统钥匙串存储")
 
-        previous_reference = self._credential_references.pop(registration.source_id, None)
-        if previous_reference is not None:
-            self._credential_store.delete(previous_reference)
+        self._delete_existing_credential(registration.source_id)
         self._credential_references[registration.source_id] = self._credential_store.put(
             registration.source_id, registration.secret
         )
@@ -105,9 +104,17 @@ class DataSourceCredentialService:
         """仅撤销 Finnhub 的内部钥匙串引用并返回脱敏受限状态。"""
 
         self._require_finnhub_credential_operation(source_id)
-        previous_reference = self._credential_references.pop(source_id, None)
-        if previous_reference is not None:
-            self._credential_store.delete(previous_reference)
+        self._delete_existing_credential(source_id)
+        return CredentialAuthorization(source_id, is_authorized=False)
+
+    def retry_pending_revocation(self, source_id: str) -> CredentialAuthorization:
+        """重试删除失败的私有引用；重试期间公开状态始终保持受限。"""
+
+        self._require_finnhub_credential_operation(source_id)
+        reference = self._pending_revocations.get(source_id)
+        if reference is not None:
+            self._credential_store.delete(reference)
+            self._pending_revocations.pop(source_id, None)
         return CredentialAuthorization(source_id, is_authorized=False)
 
     def status(self, source_id: str) -> CredentialAuthorization:
@@ -117,7 +124,11 @@ class DataSourceCredentialService:
         if not metadata.requires_credentials:
             return CredentialAuthorization(source_id, is_authorized=True)
         return CredentialAuthorization(
-            source_id, is_authorized=source_id in self._credential_references
+            source_id,
+            is_authorized=(
+                source_id in self._credential_references
+                and source_id not in self._pending_revocations
+            ),
         )
 
     def selection_record(self, source_id: str) -> DataSourceSelectionRecord:
@@ -148,3 +159,16 @@ class DataSourceCredentialService:
         self._metadata_for(source_id)
         if source_id != "finnhub":
             raise ValueError("仅 Finnhub 支持凭据操作")
+
+    def _delete_existing_credential(self, source_id: str) -> None:
+        """先保留删除失败的引用，确保后续仍可重试且不会继续授权。"""
+
+        reference = self._pending_revocations.get(source_id)
+        if reference is None:
+            reference = self._credential_references.pop(source_id, None)
+            if reference is not None:
+                self._pending_revocations[source_id] = reference
+        if reference is None:
+            return
+        self._credential_store.delete(reference)
+        self._pending_revocations.pop(source_id, None)

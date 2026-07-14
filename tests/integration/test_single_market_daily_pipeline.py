@@ -6,6 +6,13 @@ from stock_agent.adapters.market_data.sina_adapter import SinaHttpAdapter
 from stock_agent.domain.market import Market
 
 
+class 忽略事实记录器:
+    """该测试只覆盖 HTTP 解析，持久化由专门集成测试覆盖。"""
+
+    def record(self, raw_response: bytes, quotes: list[object]) -> None:
+        """不对解析测试写入共享本地目录。"""
+
+
 def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信息() -> None:
     """适配器只能使用约定地址，并将合法响应转为可量化使用的完整行情。"""
 
@@ -23,7 +30,9 @@ def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信
 
     collected_at = datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC)
 
-    quotes = SinaHttpAdapter(读取行情).fetch_quotes(["sh600000", "sz000001"], collected_at)
+    quotes = SinaHttpAdapter(读取行情, 忽略事实记录器()).fetch_quotes(
+        ["sh600000", "sz000001"], collected_at
+    )
 
     assert requested_urls == ["http://hq.sinajs.cn/list=sh600000,sz000001"]
     assert [quote.price for quote in quotes] == [10.25, 12.25]

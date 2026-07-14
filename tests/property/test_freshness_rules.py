@@ -65,17 +65,15 @@ def test_休市时忽略时间年龄并返回休市() -> None:
     )
 
 
-def test_休市时即使市场时间异常也返回休市() -> None:
-    """休市状态优先于时间年龄，避免下游把休市行情当成可用行情。"""
+def test_休市时未来市场时间仍被拒绝() -> None:
+    """未来市场时间无论开闭市都不能绕过时间一致性校验。"""
 
     collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
 
-    assert (
+    with pytest.raises(FreshnessClassificationError):
         classify_freshness(
             Market.CN, collected_at + timedelta(seconds=1), collected_at, is_open=False
         )
-        == "CLOSED"
-    )
 
 
 @pytest.mark.parametrize(

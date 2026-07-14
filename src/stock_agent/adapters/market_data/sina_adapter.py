@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import datetime
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from stock_agent.adapters.market_data.base import NormalizedQuote, SourceCapability
@@ -26,6 +27,13 @@ class SinaDataSourceError(RuntimeError):
     """表示新浪读取结果无法安全转换为完整规范化行情。"""
 
 
+class SinaFactRecorder(Protocol):
+    """定义新浪行情事实记录端口，适配器不直接依赖具体本地实现。"""
+
+    def record(self, raw_response: bytes, quotes: Sequence[NormalizedQuote]) -> None:
+        """追加保存同一批原始响应与规范化行情。"""
+
+
 class SinaHttpAdapter:
     """通过调用方注入的读取器获取并验证新浪 A 股实时报价。"""
 
@@ -36,10 +44,11 @@ class SinaHttpAdapter:
         supports_realtime=True,
     )
 
-    def __init__(self, http_get: Callable[[str], bytes]) -> None:
-        """保存受控 HTTP GET 读取器，适配器自身不创建网络连接。"""
+    def __init__(self, http_get: Callable[[str], bytes], fact_recorder: SinaFactRecorder) -> None:
+        """保存受控读取器和本地事实记录端口，拒绝无持久化的读取路径。"""
 
         self._http_get = http_get
+        self._fact_recorder = fact_recorder
 
     def fetch_quotes(self, codes: list[str], collected_at: datetime) -> list[NormalizedQuote]:
         """读取全部请求代码；任一异常均拒绝返回部分行情。"""
@@ -53,14 +62,16 @@ class SinaHttpAdapter:
             decoded_response = raw_response.decode("gbk")
             parsed_fields = self._parse_response(decoded_response, codes)
             data_version = f"sina-{hashlib.sha256(raw_response).hexdigest()}"
-            return [
+            quotes = [
                 self._normalize_quote(code, parsed_fields[code], collected_at, data_version)
                 for code in codes
             ]
+            self._fact_recorder.record(raw_response, quotes)
+            return quotes
         except SinaDataSourceError:
             raise
         except Exception as error:
-            raise SinaDataSourceError("新浪行情响应无效，拒绝生成量化行情") from error
+            raise SinaDataSourceError("新浪行情响应或本地事实保存无效，拒绝生成量化行情") from error
 
     @staticmethod
     def _validate_codes(codes: list[str]) -> None:

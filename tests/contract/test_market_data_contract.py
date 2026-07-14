@@ -13,6 +13,7 @@ from stock_agent.adapters.market_data.base import (
 from stock_agent.adapters.market_data.registry import (
     DuplicateSourceError,
     MarketDataRegistry,
+    SourceCapabilityViolationError,
     UnknownSourceError,
 )
 from stock_agent.contracts.common import Freshness
@@ -179,7 +180,7 @@ def test_规范化行情拒绝超过市场实时年龄上限(market: Market, age
             price=10.25,
             source_id="演示来源",
             market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
-            collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, age_seconds, tzinfo=UTC),
             data_version="演示版本-1",
             freshness=Freshness(state="REALTIME", age_seconds=age_seconds),
         )
@@ -197,9 +198,70 @@ def test_规范化行情接受市场实时年龄上限内的行情(market: Marke
         price=10.25,
         source_id="演示来源",
         market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
-        collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+        collected_at=datetime(2026, 7, 14, 9, 30, age_seconds, tzinfo=UTC),
         data_version="演示版本-1",
         freshness=Freshness(state="REALTIME", age_seconds=age_seconds),
     )
 
     assert quote.freshness.age_seconds == age_seconds
+
+
+def test_规范化行情拒绝与时点计算不一致的新鲜度年龄() -> None:
+    """供应商不能把过期行情填成较小年龄以伪装为实时。"""
+
+    with pytest.raises(ValidationError, match="年龄"):
+        NormalizedQuote(
+            security_id=市场证券身份(Market.CN),
+            price=10.25,
+            source_id="演示来源",
+            market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, 6, tzinfo=UTC),
+            data_version="演示版本-1",
+            freshness=Freshness(state="REALTIME", age_seconds=1),
+        )
+
+
+def test_规范化行情拒绝未来市场时间() -> None:
+    """未来市场时间不能借由非实时状态绕过事实时点边界。"""
+
+    with pytest.raises(ValidationError, match="不能晚于"):
+        NormalizedQuote(
+            security_id=市场证券身份(Market.CN),
+            price=10.25,
+            source_id="演示来源",
+            market_time=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            data_version="演示版本-1",
+            freshness=Freshness(state="CLOSED", age_seconds=0),
+        )
+
+
+@pytest.mark.parametrize(
+    "returned_source, returned_market", [("其他来源", Market.CN), ("演示来源", Market.US)]
+)
+def test_注册表拒绝与所选来源能力不一致的整批行情(
+    returned_source: str, returned_market: Market
+) -> None:
+    """注册表必须拒绝来源或市场不一致的整批返回，不能泄露部分报价。"""
+
+    class 越界适配器(演示行情适配器):
+        def fetch_quotes(self, codes: list[str], collected_at: datetime) -> list[NormalizedQuote]:
+            return [
+                NormalizedQuote(
+                    security_id=市场证券身份(returned_market),
+                    price=10.25,
+                    source_id=returned_source,
+                    market_time=collected_at,
+                    collected_at=collected_at,
+                    data_version="演示版本-1",
+                    freshness=Freshness(state="REALTIME", age_seconds=0),
+                )
+            ]
+
+    registry = MarketDataRegistry()
+    registry.register(越界适配器())
+
+    with pytest.raises(SourceCapabilityViolationError):
+        registry.fetch_quotes(
+            "演示来源", ["600000"], datetime(2026, 7, 14, 9, 30, tzinfo=UTC), Market.CN
+        )

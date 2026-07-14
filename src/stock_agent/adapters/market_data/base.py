@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
@@ -43,7 +44,13 @@ class NormalizedQuote(BaseModel):
 
     @model_validator(mode="after")
     def 验证实时行情年龄(self) -> NormalizedQuote:
-        """按证券所属市场限制实时行情的最大年龄。"""
+        """校验时点计算出的年龄，防止供应商伪造新鲜度字段。"""
+
+        age_seconds = math.ceil((self.collected_at - self.market_time).total_seconds())
+        if age_seconds < 0:
+            raise ValueError("市场时间不能晚于采集时间")
+        if self.freshness.age_seconds != age_seconds:
+            raise ValueError("行情新鲜度年龄必须与市场时间和采集时间一致")
 
         if self.freshness.state != "REALTIME":
             return self
