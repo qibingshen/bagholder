@@ -26,3 +26,24 @@ pytest 摘要：`collected 0 items / 2 errors`，进程退出码为 `2`。
 ## 范围确认
 
 仅新增或修改契约测试与本报告；未修改 `src/`，未引入任何数据源 HTTP、券商、下单或交易能力。
+
+## 审查补强（第 2 次失败验证）
+
+本次仅增强测试，未修改 `src/`：
+
+- 历史日线成功结果逐字段断言证券身份及市场、交易日、开高低收、成交量、复权口径、币种、来源、市场时点、采集时点、数据版本和新鲜度原样保留；另按字段覆盖缺失和空值拒绝。
+- 桌面状态断言状态标识原样保留，并分别要求空、加载、离线、权限、过期、可用、恢复的中文语义关键字。
+- 市场边界锁定 CN、HK、US 的期望时区和允许交易日历状态，并分别覆盖有效代码、无效代码以及交易所、币种、代码不匹配拒绝。
+
+执行命令：
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/contract/test_market_data_contract.py tests/contract/test_desktop_state_contract.py -v
+```
+
+结果仍按预期在收集阶段失败：
+
+- `tests/contract/test_market_data_contract.py:19`：`ModuleNotFoundError: No module named 'stock_agent.application.market_service'`
+- `tests/contract/test_desktop_state_contract.py:5`：`ModuleNotFoundError: No module named 'stock_agent.desktop.pages.market_page'`
+
+pytest 摘要：`collected 0 items / 2 errors`，进程退出码为 `2`。另已执行 `py -3.12 -m py_compile`，两份测试文件语法检查通过。

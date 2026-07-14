@@ -420,3 +420,169 @@ def test_历史日线查询拒绝跨市场不匹配证券代码() -> None:
             start_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
             end_date=datetime(2026, 7, 14, tzinfo=UTC).date(),
         )
+
+
+def 历史日线有效载荷() -> dict[str, object]:
+    """构造完整历史日线载荷，供字段保留和拒绝场景共用。"""
+
+    return {
+        "security_id": 市场证券身份(Market.CN),
+        "trade_date": datetime(2026, 7, 13, tzinfo=UTC).date(),
+        "open": 10.0,
+        "high": 10.5,
+        "low": 9.8,
+        "close": 10.2,
+        "volume": 1_000_000,
+        "adjustment_basis": "NONE",
+        "currency": "CNY",
+        "source_id": "契约来源",
+        "market_time": datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+        "collected_at": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        "data_version": "日线版本-1",
+        "freshness": Freshness(state="CLOSED", age_seconds=0),
+    }
+
+
+def test_历史日线成功结果逐字段原样保留() -> None:
+    """服务模型不得在规范化时丢失、重写或推断历史日线的审计字段。"""
+
+    payload = 历史日线有效载荷()
+    bar = HistoricalDailyBar(**payload)
+
+    assert bar.security_id == payload["security_id"]
+    assert bar.security_id.market is Market.CN
+    assert bar.trade_date == payload["trade_date"]
+    assert bar.open == payload["open"]
+    assert bar.high == payload["high"]
+    assert bar.low == payload["low"]
+    assert bar.close == payload["close"]
+    assert bar.volume == payload["volume"]
+    assert bar.adjustment_basis == payload["adjustment_basis"]
+    assert bar.currency == payload["currency"]
+    assert bar.source_id == payload["source_id"]
+    assert bar.market_time == payload["market_time"]
+    assert bar.collected_at == payload["collected_at"]
+    assert bar.data_version == payload["data_version"]
+    assert bar.freshness == payload["freshness"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "security_id",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "adjustment_basis",
+        "currency",
+        "source_id",
+        "market_time",
+        "collected_at",
+        "data_version",
+        "freshness",
+    ],
+)
+def test_历史日线拒绝缺失任何必填字段(field: str) -> None:
+    """历史日线的每个审计、价格和时点字段均为必填，不能使用默认值补齐。"""
+
+    payload = 历史日线有效载荷()
+    payload.pop(field)
+
+    with pytest.raises(ValidationError):
+        HistoricalDailyBar(**payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("security_id", None),
+        ("trade_date", None),
+        ("open", None),
+        ("high", None),
+        ("low", None),
+        ("close", None),
+        ("volume", None),
+        ("adjustment_basis", ""),
+        ("currency", ""),
+        ("source_id", ""),
+        ("market_time", None),
+        ("collected_at", None),
+        ("data_version", ""),
+        ("freshness", None),
+    ],
+)
+def test_历史日线拒绝必填字段空值(field: str, invalid_value: object) -> None:
+    """空值不能替代历史日线的必填字段，确保结果可追溯且可比较。"""
+
+    payload = 历史日线有效载荷()
+    payload[field] = invalid_value
+
+    with pytest.raises(ValidationError):
+        HistoricalDailyBar(**payload)
+
+
+@pytest.mark.parametrize(
+    ("market", "expected_timezone", "allowed_calendar_statuses"),
+    [
+        (Market.CN, "Asia/Shanghai", {"OPEN", "CLOSED", "MIDDAY_BREAK", "HOLIDAY"}),
+        (Market.HK, "Asia/Hong_Kong", {"OPEN", "CLOSED", "MIDDAY_BREAK", "HOLIDAY", "TYPHOON_SUSPENDED"}),
+        (Market.US, "America/New_York", {"OPEN", "CLOSED", "PRE_MARKET", "AFTER_HOURS", "HOLIDAY"}),
+    ],
+)
+def test_各市场状态锁定时区与允许交易日历状态(
+    market: Market, expected_timezone: str, allowed_calendar_statuses: set[str]
+) -> None:
+    """市场状态必须按所属市场返回明确时区和受控的交易日历状态集合。"""
+
+    status = MarketService().get_market_status(market)
+
+    assert status.market is market
+    assert status.market_timezone == expected_timezone
+    assert status.trading_calendar_status in allowed_calendar_statuses
+
+
+@pytest.mark.parametrize(
+    "security_id",
+    [
+        InstrumentIdentity(market=Market.CN, exchange="SSE", display_code="600000", currency="CNY"),
+        InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="00700", currency="HKD"),
+        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="AAPL", currency="USD"),
+    ],
+)
+def test_各市场接受匹配的证券代码(security_id: InstrumentIdentity) -> None:
+    """A股、港股和美股的有效代码应通过市场服务的身份边界校验。"""
+
+    assert MarketService().validate_security_identity(security_id) == security_id
+
+
+@pytest.mark.parametrize(
+    "security_id",
+    [
+        InstrumentIdentity(market=Market.CN, exchange="SSE", display_code="AAPL", currency="CNY"),
+        InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="600000", currency="HKD"),
+        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="00700", currency="USD"),
+    ],
+)
+def test_各市场拒绝不符合本市场格式的证券代码(security_id: InstrumentIdentity) -> None:
+    """不同市场不得接受另一市场的代码格式，以免跨市场查询串线。"""
+
+    with pytest.raises(ValueError):
+        MarketService().validate_security_identity(security_id)
+
+
+@pytest.mark.parametrize(
+    "security_id",
+    [
+        InstrumentIdentity(market=Market.CN, exchange="HKEX", display_code="600000", currency="CNY"),
+        InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="00700", currency="USD"),
+        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="600000", currency="USD"),
+    ],
+)
+def test_市场身份拒绝交易所币种或代码不匹配(security_id: InstrumentIdentity) -> None:
+    """市场、交易所、币种和代码必须构成一致身份，任一不匹配均应拒绝。"""
+
+    with pytest.raises(ValueError):
+        MarketService().validate_security_identity(security_id)
