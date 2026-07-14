@@ -4,6 +4,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from numbers import Real
 
 from stock_agent.domain.market import InstrumentIdentity, Market
 
@@ -59,10 +60,14 @@ class CompanyAction:
             raise ValueError("公司行动必须包含标识、类型、来源和版本")
         if self.effective_at.tzinfo is None or self.effective_at.utcoffset() is None:
             raise ValueError("公司行动生效时间必须带时区")
-        if self.adjustment_ratio is not None and (
-            not math.isfinite(self.adjustment_ratio) or self.adjustment_ratio <= 0
-        ):
-            raise ValueError("公司行动复权比例必须为有限正数")
+        if self.adjustment_ratio is not None:
+            if (
+                isinstance(self.adjustment_ratio, bool)
+                or not isinstance(self.adjustment_ratio, Real)
+                or not math.isfinite(self.adjustment_ratio)
+                or self.adjustment_ratio <= 0
+            ):
+                raise ValueError("公司行动复权比例必须为有限正数的真实数值")
         if (
             self.security_id is not None
             and self.market is not None
@@ -143,4 +148,8 @@ def require_company_actions_for_adjustment(
 
     if not actions:
         raise PointInTimeViolation("公司行动缺失，复权历史研究不可用")
+    if any(action.security_id is None for action in actions):
+        raise PointInTimeViolation("公司行动缺少证券归属，不能用于目标证券复权")
+    if any(action.security_id != security_id for action in actions):
+        raise PointInTimeViolation("公司行动证券与目标证券不一致，不能跨证券复权")
     return effective_actions(actions, analysis_time)

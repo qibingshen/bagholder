@@ -253,7 +253,7 @@ def test_未带市场标识的非唯一显示代码必须拒绝解析() -> None:
         resolve_instrument_identity(display_code="000001", candidates=候选证券)
 
 
-@pytest.mark.parametrize("复权比例", [0, -1, float("inf")])
+@pytest.mark.parametrize("复权比例", [True, False, "1", float("nan"), float("inf"), 0, -1])
 def test_公司行动拒绝不合法复权比例(复权比例: float) -> None:
     """复权比例必须为有限正数，不能让无效公司行动进入历史价格计算。"""
 
@@ -316,6 +316,74 @@ def test_复权历史研究在公司行动记录缺失时明确拒绝() -> None:
             security_id=InstrumentIdentity(Market.CN, "SSE", "600000", "CNY"),
             analysis_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
             actions=[],
+        )
+
+
+@pytest.mark.parametrize(
+    "行动证券",
+    [
+        None,
+        InstrumentIdentity(Market.CN, "SSE", "600519", "CNY"),
+    ],
+)
+def test_复权历史研究拒绝未知或不属于目标证券的公司行动(
+    行动证券: InstrumentIdentity | None,
+) -> None:
+    """未知归属和其他证券的行动都不能充当目标证券的复权依据。"""
+
+    from stock_agent.domain.market_rules import (
+        PointInTimeViolation,
+        require_company_actions_for_adjustment,
+    )
+
+    with pytest.raises(PointInTimeViolation, match="证券|归属|不一致|缺失"):
+        require_company_actions_for_adjustment(
+            security_id=InstrumentIdentity(Market.CN, "SSE", "600000", "CNY"),
+            analysis_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+            actions=[
+                CompanyAction(
+                    action_id="split-20260714",
+                    action_type="split",
+                    effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                    version_id="v1",
+                    source_id="test-source",
+                    security_id=行动证券,
+                )
+            ],
+        )
+
+
+def test_复权历史研究拒绝混入其他证券行动的记录集() -> None:
+    """混杂行动集不能借由一条目标证券记录绕过跨证券归属审查。"""
+
+    from stock_agent.domain.market_rules import (
+        PointInTimeViolation,
+        require_company_actions_for_adjustment,
+    )
+
+    目标证券 = InstrumentIdentity(Market.CN, "SSE", "600000", "CNY")
+    with pytest.raises(PointInTimeViolation, match="证券|不一致"):
+        require_company_actions_for_adjustment(
+            security_id=目标证券,
+            analysis_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+            actions=[
+                CompanyAction(
+                    action_id="split-target",
+                    action_type="split",
+                    effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                    version_id="v1",
+                    source_id="test-source",
+                    security_id=目标证券,
+                ),
+                CompanyAction(
+                    action_id="split-other",
+                    action_type="split",
+                    effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                    version_id="v1",
+                    source_id="test-source",
+                    security_id=InstrumentIdentity(Market.CN, "SSE", "600519", "CNY"),
+                ),
+            ],
         )
 
 
