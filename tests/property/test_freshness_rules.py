@@ -10,7 +10,14 @@ from stock_agent.domain.market import Market
 
 @pytest.mark.parametrize(
     ("market", "realtime_limit"),
-    [(Market.CN, 5), (Market.HK, 15), (Market.US, 15)],
+    [
+        (Market.CN, 0),
+        (Market.HK, 0),
+        (Market.US, 0),
+        (Market.CN, 5),
+        (Market.HK, 15),
+        (Market.US, 15),
+    ],
 )
 def test_交易时段在各市场实时精确边界内为实时(market: Market, realtime_limit: int) -> None:
     """各市场年龄等于实时阈值时仍应判为实时行情。"""
@@ -72,16 +79,21 @@ def test_休市时即使市场时间异常也返回休市() -> None:
 
 
 @pytest.mark.parametrize(
-    "market_time",
+    ("market_time", "collected_at"),
     [
-        datetime(2026, 7, 14, 9, 30),
-        datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+        (datetime(2026, 7, 14, 9, 30), datetime(2026, 7, 14, 9, 30, tzinfo=UTC)),
+        (
+            datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            datetime(2026, 7, 14, 9, 30),
+        ),
+        (
+            datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        ),
     ],
 )
-def test_拒绝无时区或负年龄的市场时间(market_time: datetime) -> None:
+def test_拒绝无时区或负年龄的时间(market_time: datetime, collected_at: datetime) -> None:
     """无时区和未来市场时间都不能伪装成新鲜行情。"""
-
-    collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
 
     with pytest.raises(FreshnessClassificationError):
         classify_freshness(Market.CN, market_time, collected_at, is_open=True)

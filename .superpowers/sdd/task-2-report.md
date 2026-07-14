@@ -52,3 +52,31 @@ py -3.12 -m ruff check src tests
 
 - 无已知功能性 concern。
 - 工作区中存在其他代理或用户的未跟踪、已修改文件；本任务提交未包含它们。
+
+## 复核修复记录
+
+### 修复内容
+
+- 新浪代码六位校验改为逐字符严格 ASCII `0-9` 判断，不再接受 Unicode 十进制数字。
+- 新鲜度测试补充 CN/HK/US 开市时年龄为 0 秒的 `REALTIME` 边界。
+- 新鲜度测试补充 `collected_at` 无时区时必须拒绝的场景。
+- 新浪代码拒绝测试补充全角数字 `１２３４５６`。
+
+### 复核 TDD 证据
+
+新增全角数字拒绝用例后，指定 pytest 命令先失败：该用例未抛出
+`UnsupportedSinaCodeError`，原因是原实现使用 `isdecimal()` 接受全角数字。收紧
+ASCII 校验后，指定 pytest 命令通过。
+
+### 复核验证证据
+
+执行时间：2026-07-14。
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/property/test_freshness_rules.py tests/failure/test_market_data_failures.py -v
+py -3.12 -m ruff format --check src tests
+py -3.12 -m ruff check src tests
+```
+
+结果：`26 passed in 0.58s`；格式检查显示 `53 files already formatted`；静态检查退出码为
+0 且无诊断。

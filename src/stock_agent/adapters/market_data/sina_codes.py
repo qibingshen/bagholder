@@ -14,7 +14,9 @@ def normalize_sina_code(identity: InstrumentIdentity) -> str:
 
     if identity.market is not Market.CN:
         raise UnsupportedSinaCodeError("新浪代码规则只支持中国市场")
-    if not identity.display_code.isdecimal() or len(identity.display_code) != 6:
+    if len(identity.display_code) != 6 or any(
+        character < "0" or character > "9" for character in identity.display_code
+    ):
         raise UnsupportedSinaCodeError("新浪代码必须是六位数字")
 
     prefix = {"SSE": "sh", "SZSE": "sz"}.get(identity.exchange)

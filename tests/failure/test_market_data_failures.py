@@ -29,6 +29,7 @@ def test_新浪代码规范化支持沪深交易所(exchange: str, display_code:
         InstrumentIdentity(Market.CN, "BSE", "830000", "CNY"),
         InstrumentIdentity(Market.CN, "SSE", "60000", "CNY"),
         InstrumentIdentity(Market.CN, "SZSE", "0000A1", "CNY"),
+        InstrumentIdentity(Market.CN, "SSE", "１２３４５６", "CNY"),
     ],
 )
 def test_新浪代码规范化拒绝跨市场交易所和非法代码(
