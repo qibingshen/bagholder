@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
@@ -10,7 +9,8 @@ from typing import Protocol
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from stock_agent.contracts.common import Freshness
-from stock_agent.domain.market import InstrumentIdentity, Market
+from stock_agent.domain.freshness import calculate_age_seconds, classify_freshness
+from stock_agent.domain.market import InstrumentIdentity
 
 
 class SourceCapability(BaseModel):
@@ -43,25 +43,21 @@ class NormalizedQuote(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def 验证实时行情年龄(self) -> NormalizedQuote:
-        """校验时点计算出的年龄，防止供应商伪造新鲜度字段。"""
+    def 验证行情新鲜度(self) -> NormalizedQuote:
+        """校验时点推导的新鲜度，防止延迟行情伪装成更高时效等级。"""
 
-        age_seconds = math.ceil((self.collected_at - self.market_time).total_seconds())
-        if age_seconds < 0:
-            raise ValueError("市场时间不能晚于采集时间")
+        age_seconds = calculate_age_seconds(self.market_time, self.collected_at)
         if self.freshness.age_seconds != age_seconds:
             raise ValueError("行情新鲜度年龄必须与市场时间和采集时间一致")
 
-        if self.freshness.state != "REALTIME":
+        if self.freshness.state == "CLOSED":
             return self
 
-        maximum_age_seconds = {
-            Market.CN: 5,
-            Market.HK: 15,
-            Market.US: 15,
-        }[self.security_id.market]
-        if self.freshness.age_seconds > maximum_age_seconds:
-            raise ValueError(f"实时行情年龄不能超过 {maximum_age_seconds} 秒")
+        expected_state = classify_freshness(
+            self.security_id.market, self.market_time, self.collected_at, is_open=True
+        )
+        if self.freshness.state != expected_state:
+            raise ValueError(f"实时行情新鲜度状态必须为 {expected_state}")
         return self
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 
 from stock_agent.contracts.common import FreshnessState
@@ -25,7 +26,7 @@ def classify_freshness(
     if not is_open:
         return "CLOSED"
 
-    age_seconds = (collected_at - market_time).total_seconds()
+    age_seconds = calculate_age_seconds(market_time, collected_at)
     realtime_limit = 5 if market is Market.CN else 15
     if age_seconds <= realtime_limit:
         return "REALTIME"
@@ -43,6 +44,13 @@ def _validate_times(market_time: datetime, collected_at: datetime) -> None:
         raise FreshnessClassificationError("市场时间和采集时间必须包含时区")
     if market_time > collected_at:
         raise FreshnessClassificationError("市场时间不能晚于采集时间")
+
+
+def calculate_age_seconds(market_time: datetime, collected_at: datetime) -> int:
+    """按真实时点差向上取整为秒，统一各行情路径的年龄口径。"""
+
+    _validate_times(market_time, collected_at)
+    return math.ceil((collected_at - market_time).total_seconds())
 
 
 def _is_aware(value: datetime) -> bool:

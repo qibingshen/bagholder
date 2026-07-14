@@ -7,6 +7,7 @@ import json
 from collections.abc import Sequence
 
 from stock_agent.adapters.market_data.base import NormalizedQuote
+from stock_agent.adapters.market_data.sina_adapter import SinaPersistenceProof
 from stock_agent.application.versioning_service import VersioningService
 
 
@@ -18,7 +19,9 @@ class SinaMarketDataFactRecorder:
 
         self._versioning_service = versioning_service
 
-    def record(self, raw_response: bytes, quotes: Sequence[NormalizedQuote]) -> None:
+    def record(
+        self, raw_response: bytes, quotes: Sequence[NormalizedQuote]
+    ) -> SinaPersistenceProof:
         """先提交原始字节，再提交引用其版本与哈希的规范化结果。"""
 
         if not quotes:
@@ -54,10 +57,17 @@ class SinaMarketDataFactRecorder:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
-        self._versioning_service.commit_bytes(
+        normalized = self._versioning_service.commit_bytes(
             dataset="market-data-normalized",
             version_id=normalized_version_id,
             content=normalized_content,
             source_id="sina",
             parent_version_id=raw.version_id,
+        )
+        return SinaPersistenceProof(
+            raw_artifact_version_id=raw.version_id,
+            raw_content_hash=raw.content_hash,
+            normalized_artifact_version_id=normalized.version_id,
+            normalized_content_hash=normalized.content_hash,
+            parent_version_id=normalized.parent_version_id or "",
         )

@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from stock_agent.adapters.market_data.sina_adapter import SinaDataSourceError, SinaHttpAdapter
+from stock_agent.adapters.market_data.sina_adapter import (
+    SinaDataSourceError,
+    SinaHttpAdapter,
+    SinaPersistenceProof,
+)
 from stock_agent.adapters.market_data.sina_provenance import SinaMarketDataFactRecorder
 from stock_agent.application.versioning_service import VersioningService
 
@@ -57,4 +61,30 @@ def test_新浪事实保存失败时不返回未持久化行情() -> None:
     adapter = SinaHttpAdapter(lambda _url: 新浪响应(), fact_recorder=失败记录器())
 
     with pytest.raises(SinaDataSourceError, match="保存"):
+        adapter.fetch_quotes(["sh600000"], datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    "proof",
+    [
+        None,
+        SinaPersistenceProof(
+            raw_artifact_version_id="raw-1",
+            raw_content_hash="0" * 64,
+            normalized_artifact_version_id="normalized-1",
+            normalized_content_hash="1" * 64,
+            parent_version_id="other-raw",
+        ),
+    ],
+)
+def test_新浪适配器拒绝缺失或不完整的持久化证明(proof: SinaPersistenceProof | None) -> None:
+    """公共适配器不能信任空记录器；原始与规范化工件证明必须完整关联。"""
+
+    class 返回证明的记录器:
+        def record(self, raw_response: bytes, quotes: list[object]) -> SinaPersistenceProof | None:
+            return proof
+
+    adapter = SinaHttpAdapter(lambda _url: 新浪响应(), fact_recorder=返回证明的记录器())
+
+    with pytest.raises(SinaDataSourceError, match="证明"):
         adapter.fetch_quotes(["sh600000"], datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC))

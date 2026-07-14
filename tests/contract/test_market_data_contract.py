@@ -1,6 +1,6 @@
 """验证行情适配器协议与注册表不依赖具体供应商。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -219,6 +219,48 @@ def test_规范化行情拒绝与时点计算不一致的新鲜度年龄() -> No
             data_version="演示版本-1",
             freshness=Freshness(state="REALTIME", age_seconds=1),
         )
+
+
+@pytest.mark.parametrize(
+    ("age_seconds", "forged_state"),
+    [
+        (61, "NEAR_REALTIME"),
+        (901, "DELAYED"),
+        (3600, "NEAR_REALTIME"),
+    ],
+)
+def test_规范化行情拒绝非休市状态伪造的新鲜度状态(age_seconds: int, forged_state: str) -> None:
+    """非休市行情必须由真实市场时间严格推导状态，不能借低等级状态伪装延迟。"""
+
+    collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+
+    with pytest.raises(ValidationError, match="状态"):
+        NormalizedQuote(
+            security_id=市场证券身份(Market.CN),
+            price=10.25,
+            source_id="演示来源",
+            market_time=collected_at - timedelta(seconds=age_seconds),
+            collected_at=collected_at,
+            data_version="演示版本-1",
+            freshness=Freshness(state=forged_state, age_seconds=age_seconds),
+        )
+
+
+def test_规范化行情使用统一的向上取整年龄计算微秒时点() -> None:
+    """含微秒的采集间隔应统一向上取整，避免适配器与统一模型产生不同年龄。"""
+
+    market_time = datetime(2026, 7, 14, 9, 30, microsecond=123456, tzinfo=UTC)
+    quote = NormalizedQuote(
+        security_id=市场证券身份(Market.CN),
+        price=10.25,
+        source_id="演示来源",
+        market_time=market_time,
+        collected_at=market_time + timedelta(seconds=3, microseconds=1),
+        data_version="演示版本-1",
+        freshness=Freshness(state="REALTIME", age_seconds=4),
+    )
+
+    assert quote.freshness.age_seconds == 4
 
 
 def test_规范化行情拒绝未来市场时间() -> None:

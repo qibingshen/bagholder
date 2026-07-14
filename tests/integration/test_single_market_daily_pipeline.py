@@ -1,19 +1,15 @@
 """验证新浪 A 股行情适配器的受控请求与规范化输出。"""
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 from stock_agent.adapters.market_data.sina_adapter import SinaHttpAdapter
+from stock_agent.adapters.market_data.sina_provenance import SinaMarketDataFactRecorder
+from stock_agent.application.versioning_service import VersioningService
 from stock_agent.domain.market import Market
 
 
-class 忽略事实记录器:
-    """该测试只覆盖 HTTP 解析，持久化由专门集成测试覆盖。"""
-
-    def record(self, raw_response: bytes, quotes: list[object]) -> None:
-        """不对解析测试写入共享本地目录。"""
-
-
-def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信息() -> None:
+def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信息(local_data_root: Path) -> None:
     """适配器只能使用约定地址，并将合法响应转为可量化使用的完整行情。"""
 
     requested_urls: list[str] = []
@@ -28,11 +24,11 @@ def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信
         requested_urls.append(url)
         return response
 
-    collected_at = datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC)
+    collected_at = datetime(2026, 7, 14, 1, 30, 3, 1, tzinfo=UTC)
 
-    quotes = SinaHttpAdapter(读取行情, 忽略事实记录器()).fetch_quotes(
-        ["sh600000", "sz000001"], collected_at
-    )
+    quotes = SinaHttpAdapter(
+        读取行情, SinaMarketDataFactRecorder(VersioningService(local_data_root))
+    ).fetch_quotes(["sh600000", "sz000001"], collected_at)
 
     assert requested_urls == ["http://hq.sinajs.cn/list=sh600000,sz000001"]
     assert [quote.price for quote in quotes] == [10.25, 12.25]
@@ -44,4 +40,4 @@ def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信
     assert all(quote.market_time.tzinfo.key == "Asia/Shanghai" for quote in quotes)
     assert all(quote.data_version.startswith("sina-") for quote in quotes)
     assert all(quote.freshness.state == "REALTIME" for quote in quotes)
-    assert all(quote.freshness.age_seconds == 3 for quote in quotes)
+    assert all(quote.freshness.age_seconds == 4 for quote in quotes)

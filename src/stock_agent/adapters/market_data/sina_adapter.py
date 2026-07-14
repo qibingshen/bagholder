@@ -6,13 +6,14 @@ import hashlib
 import math
 import re
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from stock_agent.adapters.market_data.base import NormalizedQuote, SourceCapability
 from stock_agent.contracts.common import Freshness
-from stock_agent.domain.freshness import classify_freshness
+from stock_agent.domain.freshness import calculate_age_seconds, classify_freshness
 from stock_agent.domain.market import InstrumentIdentity, Market
 
 _SINA_URL_PREFIX = "http://hq.sinajs.cn/list="
@@ -27,11 +28,24 @@ class SinaDataSourceError(RuntimeError):
     """表示新浪读取结果无法安全转换为完整规范化行情。"""
 
 
+@dataclass(frozen=True, slots=True)
+class SinaPersistenceProof:
+    """描述已追加提交的原始和规范化行情工件及其版本关联。"""
+
+    raw_artifact_version_id: str
+    raw_content_hash: str
+    normalized_artifact_version_id: str
+    normalized_content_hash: str
+    parent_version_id: str
+
+
 class SinaFactRecorder(Protocol):
     """定义新浪行情事实记录端口，适配器不直接依赖具体本地实现。"""
 
-    def record(self, raw_response: bytes, quotes: Sequence[NormalizedQuote]) -> None:
-        """追加保存同一批原始响应与规范化行情。"""
+    def record(
+        self, raw_response: bytes, quotes: Sequence[NormalizedQuote]
+    ) -> SinaPersistenceProof:
+        """追加保存同一批原始响应与规范化行情，并返回可校验的持久化证明。"""
 
 
 class SinaHttpAdapter:
@@ -66,12 +80,31 @@ class SinaHttpAdapter:
                 self._normalize_quote(code, parsed_fields[code], collected_at, data_version)
                 for code in codes
             ]
-            self._fact_recorder.record(raw_response, quotes)
+            proof = self._fact_recorder.record(raw_response, quotes)
+            self._validate_persistence_proof(proof, raw_response)
             return quotes
         except SinaDataSourceError:
             raise
         except Exception as error:
             raise SinaDataSourceError("新浪行情响应或本地事实保存无效，拒绝生成量化行情") from error
+
+    @staticmethod
+    def _validate_persistence_proof(proof: SinaPersistenceProof, raw_response: bytes) -> None:
+        """确认记录器返回了完整的原始、规范化工件与父版本关联证明。"""
+
+        if not isinstance(proof, SinaPersistenceProof):
+            raise SinaDataSourceError("新浪事实保存未返回可验证的持久化证明")
+        if (
+            not proof.raw_artifact_version_id
+            or not proof.normalized_artifact_version_id
+            or proof.parent_version_id != proof.raw_artifact_version_id
+            or proof.raw_content_hash != hashlib.sha256(raw_response).hexdigest()
+            or len(proof.normalized_content_hash) != 64
+            or any(
+                character not in "0123456789abcdef" for character in proof.normalized_content_hash
+            )
+        ):
+            raise SinaDataSourceError("新浪事实保存返回的持久化证明不完整")
 
     @staticmethod
     def _validate_codes(codes: list[str]) -> None:
@@ -118,7 +151,7 @@ class SinaHttpAdapter:
                 f"{fields[30].strip()} {fields[31].strip()}", "%Y-%m-%d %H:%M:%S"
             ).replace(tzinfo=_SHANGHAI_TIMEZONE)
             freshness_state = classify_freshness(Market.CN, market_time, collected_at, is_open=True)
-            age_seconds = int((collected_at - market_time).total_seconds())
+            age_seconds = calculate_age_seconds(market_time, collected_at)
             match = _SINA_CODE_PATTERN.fullmatch(code)
             if match is None:
                 raise ValueError("响应代码格式错误")
