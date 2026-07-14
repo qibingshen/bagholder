@@ -39,11 +39,7 @@ class VersioningService:
         self._recover_incomplete_batches()
 
     def version_exists(self, dataset: str, version_id: str) -> bool:
-        """只把单版本完成标记或已完成批次中的版本视为可查询。"""
-        if (
-            self._root / "artifacts" / dataset / version_id / "_COMPLETE"
-        ).is_file() and self._metadata.has_version(dataset, version_id):
-            return True
+        """仅在所属批次完成公开后，才将版本视为可查询。"""
         return self._completed_batch_contains(dataset, version_id)
 
     def commit_bytes(

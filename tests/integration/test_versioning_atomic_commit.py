@@ -167,7 +167,42 @@ def test_interrupted_single_commit_is_recovered_on_next_startup(
     ).fetchone() == (0,)
 
 
-@pytest.mark.parametrize("damaged_journal", ["{}", '{"entries":['])
+def test_single_commit_is_invisible_until_its_batch_is_published(
+    local_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """单工件自身完成且元数据已登记时，仍必须等待所属批次公开。"""
+    from stock_agent.application.versioning_service import VersioningService
+
+    service = VersioningService(local_data_root)
+    original_touch = Path.touch
+
+    def interrupt_before_batch_publication(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "_COMPLETE" and ".batches" in path.parts:
+            raise OSError("进程在批次发布前中断")
+        original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", interrupt_before_batch_publication)
+    monkeypatch.setattr(service, "rollback_batch", lambda _batch_id: None)
+
+    with pytest.raises(OSError, match="批次发布前中断"):
+        service.commit_bytes(
+            dataset="daily-bars", version_id="v1", content=b"payload", source_id="test-source"
+        )
+
+    assert not service.version_exists("daily-bars", "v1")
+    with pytest.raises(KeyError):
+        service.read_bytes("daily-bars", "v1")
+    with pytest.raises(KeyError):
+        service.metadata_for("daily-bars", "v1")
+
+    recovered = VersioningService(local_data_root)
+    assert not (local_data_root / "artifacts" / "daily-bars").exists()
+    assert recovered._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("damaged_journal", ["{}", '{"entries":[]}', '{"entries":['])
 def test_damaged_or_empty_journal_without_batch_index_uses_staging_manifest_for_recovery(
     local_data_root: Path, damaged_journal: str
 ) -> None:
