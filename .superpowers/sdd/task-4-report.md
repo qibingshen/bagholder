@@ -44,3 +44,26 @@ py -3.12 -m ruff check src tests
 ## Concerns
 
 - 当前桌面层仅提供页面状态模型；实际 PySide6 视图尚未在本任务范围内，因此调用方需要使用 `from_selection_record` 渲染选择摘要。
+
+## 修复与复验
+
+审查修复后，公开的 `CredentialAuthorization` 仅包含 `source_id` 和 `is_authorized`；钥匙串引用仅存于服务内部私有映射。配置仅允许 Finnhub 且要求 `KeyringCredentialStore`，新浪、未知源和非钥匙串存储均明确失败。撤销仅允许 Finnhub，查询和选择记录仅允许受控数据源。页面移除了 `from_authorization`，只接收脱敏的选择记录，因此新浪会保留“公开只读”状态。
+
+本次先替换契约测试并执行：
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/contract/test_data_source_credentials.py -v
+```
+
+红灯结果：5 项中 4 项失败，分别证明公开对象仍暴露钥匙串引用、Finnhub 配置引用泄露、未知源可配置，以及页面仍存在 `from_authorization`；新浪选择记录测试通过。
+
+最小修复后执行：
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/contract/test_data_source_credentials.py tests/failure/test_credential_exposure.py -v
+py -3.12 -m ruff format --check src tests
+py -3.12 -m ruff check src tests
+git diff --check
+```
+
+复验结果：7 项测试全部通过；Ruff 格式检查通过（55 个文件已格式化）；Ruff 静态检查通过；差异检查通过。

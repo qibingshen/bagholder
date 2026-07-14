@@ -1,14 +1,17 @@
-"""管理数据源授权引用，确保明文凭据不进入领域记录、日志或桌面状态。"""
+"""管理受控数据源授权，确保公开状态、审计和页面不携带密钥或钥匙串引用。"""
 
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from stock_agent.adapters.platform.credential_store import CredentialStore
+from stock_agent.adapters.platform.credential_store import (
+    CredentialStore,
+    KeyringCredentialStore,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CredentialRegistration:
-    """接收待保存凭据的短生命周期输入。"""
+    """接收短生命周期的密钥输入，仅允许由 Finnhub 配置路径消费。"""
 
     source_id: str
     secret: str
@@ -20,16 +23,10 @@ class CredentialRegistration:
 
 @dataclass(frozen=True, slots=True)
 class CredentialAuthorization:
-    """可展示的授权状态，永不包含明文凭据。"""
+    """面向普通调用方的脱敏授权状态，不包含密钥或钥匙串引用。"""
 
     source_id: str
-    credential_reference: str | None
-
-    @property
-    def is_authorized(self) -> bool:
-        """只有存在可撤销引用时才允许数据源适配器请求受限数据。"""
-
-        return self.credential_reference is not None
+    is_authorized: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,47 +80,50 @@ _SELECTION_AUDIT_NOTES = MappingProxyType(
 
 
 class DataSourceCredentialService:
-    """协调安全保险库与可展示的授权状态，不向上层返回明文凭据。"""
+    """协调受控数据源与系统钥匙串，公开接口只返回脱敏状态。"""
 
     def __init__(self, credential_store: CredentialStore) -> None:
         self._credential_store = credential_store
-        self._authorizations: dict[str, CredentialAuthorization] = {}
+        self._credential_references: dict[str, str] = {}
 
     def configure(self, registration: CredentialRegistration) -> CredentialAuthorization:
-        """保存凭据并记录其引用；重新配置时先撤销旧引用。"""
+        """仅通过系统钥匙串配置 Finnhub，并返回不含引用的授权状态。"""
 
-        metadata = DATA_SOURCE_METADATA.get(registration.source_id)
-        if metadata and not metadata.requires_credentials:
-            raise ValueError("公开只读数据源不接受凭据配置")
+        self._require_finnhub_credential_operation(registration.source_id)
+        if not isinstance(self._credential_store, KeyringCredentialStore):
+            raise ValueError("Finnhub 凭据必须使用系统钥匙串存储")
 
-        previous = self._authorizations.get(registration.source_id)
-        if previous and previous.credential_reference:
-            self._credential_store.delete(previous.credential_reference)
-        reference = self._credential_store.put(registration.source_id, registration.secret)
-        authorization = CredentialAuthorization(registration.source_id, reference)
-        self._authorizations[registration.source_id] = authorization
-        return authorization
+        previous_reference = self._credential_references.get(registration.source_id)
+        if previous_reference is not None:
+            self._credential_store.delete(previous_reference)
+        self._credential_references[registration.source_id] = self._credential_store.put(
+            registration.source_id, registration.secret
+        )
+        return CredentialAuthorization(registration.source_id, is_authorized=True)
 
     def revoke(self, source_id: str) -> CredentialAuthorization:
-        """撤销数据源授权并保留受限状态，调用方必须触发明确的降级展示。"""
+        """仅撤销 Finnhub 的内部钥匙串引用并返回脱敏受限状态。"""
 
-        previous = self._authorizations.pop(source_id, None)
-        if previous and previous.credential_reference:
-            self._credential_store.delete(previous.credential_reference)
-        return CredentialAuthorization(source_id, None)
+        self._require_finnhub_credential_operation(source_id)
+        previous_reference = self._credential_references.pop(source_id, None)
+        if previous_reference is not None:
+            self._credential_store.delete(previous_reference)
+        return CredentialAuthorization(source_id, is_authorized=False)
 
     def status(self, source_id: str) -> CredentialAuthorization:
-        """返回授权或受限状态，不泄露保险库内部内容。"""
+        """查询受控数据源的脱敏状态；未知数据源明确失败。"""
 
-        return self._authorizations.get(source_id, CredentialAuthorization(source_id, None))
+        metadata = self._metadata_for(source_id)
+        if not metadata.requires_credentials:
+            return CredentialAuthorization(source_id, is_authorized=True)
+        return CredentialAuthorization(
+            source_id, is_authorized=source_id in self._credential_references
+        )
 
     def selection_record(self, source_id: str) -> DataSourceSelectionRecord:
         """返回可审计的选择状态，永不携带凭据或钥匙串引用。"""
 
-        metadata = DATA_SOURCE_METADATA.get(source_id)
-        if metadata is None:
-            raise ValueError("不支持的数据源")
-
+        metadata = self._metadata_for(source_id)
         access_state = metadata.access_state
         if metadata.requires_credentials and self.status(source_id).is_authorized:
             access_state = "已授权"
@@ -136,3 +136,15 @@ class DataSourceCredentialService:
             degradation_notice=metadata.degradation_notice,
             audit_note=_SELECTION_AUDIT_NOTES[source_id],
         )
+
+    @staticmethod
+    def _metadata_for(source_id: str) -> DataSourceMetadata:
+        metadata = DATA_SOURCE_METADATA.get(source_id)
+        if metadata is None:
+            raise ValueError("不支持的数据源")
+        return metadata
+
+    def _require_finnhub_credential_operation(self, source_id: str) -> None:
+        self._metadata_for(source_id)
+        if source_id != "finnhub":
+            raise ValueError("仅 Finnhub 支持凭据操作")

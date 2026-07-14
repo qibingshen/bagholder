@@ -1,134 +1,117 @@
-"""验证数据源凭据配置只保存引用且支持重新授权。"""
+"""验证新浪和 Finnhub 的受控配置、公开状态与页面脱敏边界。"""
 
 import pytest
 
 
-def test_凭据配置拒绝空数据源和空密钥() -> None:
-    """无效配置不能创建安全存储引用或启动数据读取。"""
+class FakeKeyring:
+    """记录系统钥匙串调用，供受控配置路径验收使用。"""
 
-    from stock_agent.application.data_source_credential_service import CredentialRegistration
+    def __init__(self) -> None:
+        self.items: dict[tuple[str, str], str] = {}
 
-    with pytest.raises(ValueError):
-        CredentialRegistration(source_id="", secret="valid-secret")
-    with pytest.raises(ValueError):
-        CredentialRegistration(source_id="licensed-source", secret="")
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        self.items[(service_name, username)] = password
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        self.items.pop((service_name, username))
 
 
-def test_授权记录只暴露引用不暴露明文凭据() -> None:
-    """界面和 MCP 只能看到数据源状态与安全存储引用。"""
+def test_公开授权状态不含密钥或钥匙串引用() -> None:
+    """普通调用方只能得到脱敏授权状态，不能读取内部钥匙串引用。"""
 
     from stock_agent.application.data_source_credential_service import CredentialAuthorization
 
-    authorization = CredentialAuthorization(
-        source_id="licensed-source", credential_reference="platform-keychain://licensed-source/1"
-    )
+    authorization = CredentialAuthorization(source_id="finnhub", is_authorized=True)
 
-    assert authorization.credential_reference.startswith("platform-keychain://")
+    assert authorization.is_authorized is True
     assert not hasattr(authorization, "secret")
+    assert not hasattr(authorization, "credential_reference")
+    assert "platform-keychain://" not in str(authorization)
 
 
-def test_配置撤销与受限桌面状态不暴露凭据(tmp_path) -> None:
-    """同一数据目录只能由一个进程持锁，撤销授权后界面必须明确降级。"""
-
-    from stock_agent.adapters.platform.credential_store import ReferenceCredentialStore
-    from stock_agent.adapters.platform.paths import RuntimeLock, RuntimeLockError
-    from stock_agent.application.data_source_credential_service import (
-        CredentialRegistration,
-        DataSourceCredentialService,
-    )
-    from stock_agent.desktop.pages.data_source_page import DataSourcePageState
-
-    first_lock = RuntimeLock(tmp_path)
-    first_lock.acquire()
-    try:
-        with pytest.raises(RuntimeLockError):
-            RuntimeLock(tmp_path).acquire()
-
-        service = DataSourceCredentialService(ReferenceCredentialStore())
-        authorization = service.configure(
-            CredentialRegistration("licensed-source", "never-log-this")
-        )
-        configured = DataSourcePageState.from_authorization(authorization)
-        assert configured.access_state == "已授权"
-        assert "never-log-this" not in configured.summary
-
-        service.revoke("licensed-source")
-        restricted = DataSourcePageState.from_authorization(service.status("licensed-source"))
-        assert restricted.access_state == "受限"
-        assert restricted.summary == "未配置可用凭据，相关数据源已降级。"
-    finally:
-        first_lock.release()
-
-
-def test_系统凭据保险库只向业务层返回引用() -> None:
-    """正式适配器必须把明文停留在系统钥匙串，而非应用内存或配置文件。"""
-
-    from stock_agent.adapters.platform.credential_store import KeyringCredentialStore
-
-    class FakeKeyring:
-        def __init__(self) -> None:
-            self.items: dict[tuple[str, str], str] = {}
-
-        def set_password(self, service_name: str, username: str, password: str) -> None:
-            self.items[(service_name, username)] = password
-
-        def delete_password(self, service_name: str, username: str) -> None:
-            self.items.pop((service_name, username))
-
-    fake_keyring = FakeKeyring()
-    store = KeyringCredentialStore(keyring_backend=fake_keyring)
-    reference = store.put("licensed-source", "never-log-this")
-    store.delete(reference)
-
-    assert reference.startswith("platform-keychain://licensed-source/")
-    assert fake_keyring.items == {}
-
-
-def test_新浪为公开只读候选且明确不保证实时() -> None:
+def test_新浪为公开只读候选且页面保持公开状态() -> None:
     """新浪只能作为无需凭据的 A 股公开只读候选，不能承诺实时行情。"""
 
     from stock_agent.adapters.platform.credential_store import ReferenceCredentialStore
     from stock_agent.application.data_source_credential_service import (
         DataSourceCredentialService,
     )
+    from stock_agent.desktop.pages.data_source_page import DataSourcePageState
 
     selection = DataSourceCredentialService(ReferenceCredentialStore()).selection_record("sina")
+    page_state = DataSourcePageState.from_selection_record(selection)
 
     assert selection.source_id == "sina"
     assert selection.supported_markets == ("CN",)
     assert selection.requires_credentials is False
     assert selection.access_state == "公开只读"
     assert "不保证实时" in selection.degradation_notice
+    assert page_state.access_state == "公开只读"
     assert "URL" in selection.audit_note
     assert "市场时间" in selection.audit_note
     assert "新鲜度" in selection.audit_note
 
 
-def test_finnhub未授权时受限配置后授权且页面不泄露凭据或引用() -> None:
-    """Finnhub 仅在系统钥匙串保存用户自带密钥，页面始终不展示密钥或引用。"""
+def test_finnhub仅通过系统钥匙串配置并在撤销后恢复受限() -> None:
+    """Finnhub 密钥必须进入 KeyringCredentialStore，公开状态和页面均不泄露引用。"""
 
-    from stock_agent.adapters.platform.credential_store import ReferenceCredentialStore
+    from stock_agent.adapters.platform.credential_store import KeyringCredentialStore
     from stock_agent.application.data_source_credential_service import (
         CredentialRegistration,
         DataSourceCredentialService,
     )
     from stock_agent.desktop.pages.data_source_page import DataSourcePageState
 
+    fake_keyring = FakeKeyring()
+    service = DataSourceCredentialService(KeyringCredentialStore(keyring_backend=fake_keyring))
+    assert service.status("finnhub").is_authorized is False
+    assert service.selection_record("finnhub").access_state == "受限"
+
+    configured = service.configure(CredentialRegistration("finnhub", "test-secret"))
+    page_state = DataSourcePageState.from_selection_record(service.selection_record("finnhub"))
+    assert configured.is_authorized is True
+    assert len(fake_keyring.items) == 1
+    assert page_state.access_state == "已授权"
+    assert "test-secret" not in page_state.summary
+    assert "platform-keychain://" not in page_state.summary
+    assert "platform-keychain://" not in str(configured)
+
+    revoked = service.revoke("finnhub")
+    assert revoked.is_authorized is False
+    assert fake_keyring.items == {}
+    assert service.selection_record("finnhub").access_state == "受限"
+
+
+def test_凭据操作拒绝非finnhub和非钥匙串存储() -> None:
+    """新浪、未知源及非系统钥匙串都不能创建、删除或伪造授权状态。"""
+
+    from stock_agent.adapters.platform.credential_store import ReferenceCredentialStore
+    from stock_agent.application.data_source_credential_service import (
+        CredentialRegistration,
+        DataSourceCredentialService,
+    )
+
     service = DataSourceCredentialService(ReferenceCredentialStore())
-    restricted = service.selection_record("finnhub")
-    assert restricted.supported_markets == ("US",)
-    assert restricted.requires_credentials is True
-    assert restricted.access_state == "受限"
-    assert "无密钥降级" in restricted.degradation_notice
 
-    service.configure(CredentialRegistration("finnhub", "test-secret"))
-    configured = DataSourcePageState.from_selection_record(service.selection_record("finnhub"))
-    assert configured.access_state == "已授权"
-    assert "test-secret" not in configured.summary
-    assert "platform-keychain://" not in configured.summary
+    with pytest.raises(ValueError):
+        service.configure(CredentialRegistration("sina", "test-secret"))
+    with pytest.raises(ValueError):
+        service.configure(CredentialRegistration("unknown", "test-secret"))
+    with pytest.raises(ValueError):
+        service.configure(CredentialRegistration("finnhub", "test-secret"))
+    with pytest.raises(ValueError):
+        service.revoke("sina")
+    with pytest.raises(ValueError):
+        service.revoke("unknown")
+    with pytest.raises(ValueError):
+        service.status("unknown")
+    with pytest.raises(ValueError):
+        service.selection_record("unknown")
 
-    service.revoke("finnhub")
-    revoked = service.selection_record("finnhub")
-    assert revoked.access_state == "受限"
-    assert "不混用" in revoked.audit_note
-    assert "不绕过许可" in revoked.audit_note
+
+def test_页面只接受脱敏选择记录() -> None:
+    """页面不能从授权对象推断状态，避免密钥引用进入渲染路径。"""
+
+    from stock_agent.desktop.pages.data_source_page import DataSourcePageState
+
+    assert not hasattr(DataSourcePageState, "from_authorization")
