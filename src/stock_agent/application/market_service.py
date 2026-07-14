@@ -28,6 +28,7 @@ class MarketStatus(BaseModel):
     source_id: str = Field(min_length=1)
     data_version: str = Field(min_length=1)
     freshness: Freshness
+    is_verified: bool = False
 
     @model_validator(mode="after")
     def 验证市场状态事实(self) -> MarketStatus:
