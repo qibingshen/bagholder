@@ -4,7 +4,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from numbers import Real
+from decimal import Decimal
 
 from stock_agent.domain.market import InstrumentIdentity, Market
 
@@ -44,7 +44,7 @@ class CompanyAction:
     effective_at: datetime
     version_id: str
     source_id: str
-    adjustment_ratio: float | None = None
+    adjustment_ratio: int | float | Decimal | None = None
     security_id: InstrumentIdentity | None = None
     market: Market | None = None
 
@@ -63,7 +63,7 @@ class CompanyAction:
         if self.adjustment_ratio is not None:
             if (
                 isinstance(self.adjustment_ratio, bool)
-                or not isinstance(self.adjustment_ratio, Real)
+                or not isinstance(self.adjustment_ratio, (int, float, Decimal))
                 or not math.isfinite(self.adjustment_ratio)
                 or self.adjustment_ratio <= 0
             ):

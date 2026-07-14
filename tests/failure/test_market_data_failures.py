@@ -1,6 +1,7 @@
 """验证新浪代码规则拒绝不安全或不受支持的身份。"""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -253,8 +254,39 @@ def test_未带市场标识的非唯一显示代码必须拒绝解析() -> None:
         resolve_instrument_identity(display_code="000001", candidates=候选证券)
 
 
-@pytest.mark.parametrize("复权比例", [True, False, "1", float("nan"), float("inf"), 0, -1])
-def test_公司行动拒绝不合法复权比例(复权比例: float) -> None:
+def test_公司行动接受有限正数的_decimal_复权比例() -> None:
+    """Decimal 有限正数可作为精确复权比例，避免二进制浮点误差。"""
+
+    action = CompanyAction(
+        action_id="split-20260714",
+        action_type="split",
+        effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        version_id="v1",
+        source_id="test-source",
+        adjustment_ratio=Decimal("1.1"),
+    )
+
+    assert action.adjustment_ratio == Decimal("1.1")
+
+
+@pytest.mark.parametrize(
+    "复权比例",
+    [
+        True,
+        False,
+        "1",
+        1 + 0j,
+        float("nan"),
+        float("inf"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        0,
+        Decimal("0"),
+        -1,
+        Decimal("-1"),
+    ],
+)
+def test_公司行动拒绝不合法复权比例(复权比例: object) -> None:
     """复权比例必须为有限正数，不能让无效公司行动进入历史价格计算。"""
 
     with pytest.raises(ValueError, match="复权比例"):
