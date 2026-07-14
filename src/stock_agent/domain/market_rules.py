@@ -61,12 +61,16 @@ class CompanyAction:
         if self.effective_at.tzinfo is None or self.effective_at.utcoffset() is None:
             raise ValueError("公司行动生效时间必须带时区")
         if self.adjustment_ratio is not None:
-            if (
-                isinstance(self.adjustment_ratio, bool)
-                or not isinstance(self.adjustment_ratio, (int, float, Decimal))
-                or not math.isfinite(self.adjustment_ratio)
-                or self.adjustment_ratio <= 0
-            ):
+            ratio = self.adjustment_ratio
+            if isinstance(ratio, Decimal):
+                is_valid_ratio = ratio.is_finite() and ratio > 0
+            elif isinstance(ratio, float):
+                is_valid_ratio = math.isfinite(ratio) and ratio > 0
+            elif isinstance(ratio, int) and not isinstance(ratio, bool):
+                is_valid_ratio = ratio > 0
+            else:
+                is_valid_ratio = False
+            if not is_valid_ratio:
                 raise ValueError("公司行动复权比例必须为有限正数的真实数值")
         if (
             self.security_id is not None

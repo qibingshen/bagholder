@@ -269,6 +269,22 @@ def test_公司行动接受有限正数的_decimal_复权比例() -> None:
     assert action.adjustment_ratio == Decimal("1.1")
 
 
+def test_公司行动接受极大但有限的_decimal_复权比例() -> None:
+    """有限 Decimal 不应因浮点转换溢出而被拒绝。"""
+
+    ratio = Decimal("1E+999999")
+    action = CompanyAction(
+        action_id="split-20260714",
+        action_type="split",
+        effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+        version_id="v1",
+        source_id="test-source",
+        adjustment_ratio=ratio,
+    )
+
+    assert action.adjustment_ratio == ratio
+
+
 @pytest.mark.parametrize(
     "复权比例",
     [
@@ -280,6 +296,8 @@ def test_公司行动接受有限正数的_decimal_复权比例() -> None:
         float("inf"),
         Decimal("NaN"),
         Decimal("Infinity"),
+        Decimal("-Infinity"),
+        Decimal("sNaN"),
         0,
         Decimal("0"),
         -1,
