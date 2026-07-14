@@ -12,6 +12,7 @@ from typing import Protocol
 from zoneinfo import ZoneInfo
 
 from stock_agent.adapters.market_data.base import NormalizedQuote, SourceCapability
+from stock_agent.application.versioning_service import VersioningService
 from stock_agent.contracts.common import Freshness
 from stock_agent.domain.freshness import calculate_age_seconds, classify_freshness
 from stock_agent.domain.market import InstrumentIdentity, Market
@@ -58,11 +59,17 @@ class SinaHttpAdapter:
         supports_realtime=True,
     )
 
-    def __init__(self, http_get: Callable[[str], bytes], fact_recorder: SinaFactRecorder) -> None:
-        """保存受控读取器和本地事实记录端口，拒绝无持久化的读取路径。"""
+    def __init__(
+        self,
+        http_get: Callable[[str], bytes],
+        fact_recorder: SinaFactRecorder,
+        versioning_service: VersioningService,
+    ) -> None:
+        """绑定读取器、记录器和既有版本服务，拒绝无真实工件验证的读取路径。"""
 
         self._http_get = http_get
         self._fact_recorder = fact_recorder
+        self._versioning_service = versioning_service
 
     def fetch_quotes(self, codes: list[str], collected_at: datetime) -> list[NormalizedQuote]:
         """读取全部请求代码；任一异常均拒绝返回部分行情。"""
@@ -82,6 +89,7 @@ class SinaHttpAdapter:
             ]
             proof = self._fact_recorder.record(raw_response, quotes)
             self._validate_persistence_proof(proof, raw_response)
+            self._verify_persisted_artifacts(proof)
             return quotes
         except SinaDataSourceError:
             raise
@@ -105,6 +113,35 @@ class SinaHttpAdapter:
             )
         ):
             raise SinaDataSourceError("新浪事实保存返回的持久化证明不完整")
+
+    def _verify_persisted_artifacts(self, proof: SinaPersistenceProof) -> None:
+        """从既有版本服务回读工件和元数据，拒绝仅形态正确的伪造证明。"""
+
+        raw_dataset = "market-data-raw"
+        normalized_dataset = "market-data-normalized"
+        if not (
+            self._versioning_service.version_exists(raw_dataset, proof.raw_artifact_version_id)
+            and self._versioning_service.version_exists(
+                normalized_dataset, proof.normalized_artifact_version_id
+            )
+        ):
+            raise SinaDataSourceError("新浪事实工件未实际落盘")
+
+        raw_content = self._versioning_service.read_bytes(
+            raw_dataset, proof.raw_artifact_version_id
+        )
+        normalized_content = self._versioning_service.read_bytes(
+            normalized_dataset, proof.normalized_artifact_version_id
+        )
+        normalized_metadata = self._versioning_service.metadata_for(
+            normalized_dataset, proof.normalized_artifact_version_id
+        )
+        if (
+            hashlib.sha256(raw_content).hexdigest() != proof.raw_content_hash
+            or hashlib.sha256(normalized_content).hexdigest() != proof.normalized_content_hash
+            or normalized_metadata["parent_version_id"] != proof.raw_artifact_version_id
+        ):
+            raise SinaDataSourceError("新浪事实工件哈希或父版本关联不匹配")
 
     @staticmethod
     def _validate_codes(codes: list[str]) -> None:

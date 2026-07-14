@@ -26,8 +26,11 @@ def test_新浪适配器以精确地址读取_GBK_行情并保留完整溯源信
 
     collected_at = datetime(2026, 7, 14, 1, 30, 3, 1, tzinfo=UTC)
 
+    service = VersioningService(local_data_root)
     quotes = SinaHttpAdapter(
-        读取行情, SinaMarketDataFactRecorder(VersioningService(local_data_root))
+        读取行情,
+        SinaMarketDataFactRecorder(service),
+        service,
     ).fetch_quotes(["sh600000", "sz000001"], collected_at)
 
     assert requested_urls == ["http://hq.sinajs.cn/list=sh600000,sz000001"]
