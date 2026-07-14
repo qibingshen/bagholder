@@ -15,7 +15,12 @@ from stock_agent.domain.freshness import (
     FreshnessClassificationError,
     is_usable_for_current_prediction,
 )
-from stock_agent.domain.market import InstrumentIdentity, Market
+from stock_agent.domain.market import (
+    InstrumentIdentity,
+    InstrumentIdentityInput,
+    Market,
+    MarketRuleError,
+)
 from stock_agent.domain.market_rules import CompanyAction
 
 
@@ -50,19 +55,40 @@ def test_新浪代码规范化支持沪深交易所(exchange: str, display_code:
     [
         InstrumentIdentity(Market.HK, "HKEX", "00001", "HKD"),
         InstrumentIdentity(Market.US, "NASDAQ", "AAPL", "USD"),
-        InstrumentIdentity(Market.CN, "BSE", "830000", "CNY"),
-        InstrumentIdentity(Market.CN, "SSE", "60000", "CNY"),
-        InstrumentIdentity(Market.CN, "SZSE", "0000A1", "CNY"),
-        InstrumentIdentity(Market.CN, "SSE", "１２３４５６", "CNY"),
     ],
 )
-def test_新浪代码规范化拒绝跨市场交易所和非法代码(
-    identity: InstrumentIdentity,
-) -> None:
-    """非中国市场、非沪深交易所或非六码数字代码一律拒绝。"""
+def test_新浪代码规范化拒绝不支持的有效市场(identity: InstrumentIdentity) -> None:
+    """其他市场的有效证券身份也不得进入仅支持 A 股的新浪代码边界。"""
 
     with pytest.raises(UnsupportedSinaCodeError):
         normalize_sina_code(identity)
+
+
+@pytest.mark.parametrize(
+    "raw_identity",
+    [
+        InstrumentIdentityInput(Market.CN, "BSE", "830000", "CNY"),
+        InstrumentIdentityInput(Market.CN, "SSE", "60000", "CNY"),
+        InstrumentIdentityInput(Market.CN, "SZSE", "0000A1", "CNY"),
+        InstrumentIdentityInput(Market.CN, "SSE", "１２３４５６", "CNY"),
+    ],
+)
+def test_原始证券输入转换拒绝跨市场交易所和非法代码(
+    raw_identity: InstrumentIdentityInput,
+) -> None:
+    """失败场景先以原始输入记录，转换为公开证券身份时再统一拒绝。"""
+
+    with pytest.raises(MarketRuleError):
+        raw_identity.to_identity()
+
+
+def test_原始证券输入转换拒绝非正式市场标识() -> None:
+    """原始接口的字符串市场标识不能绕过正式枚举和证券身份规则。"""
+
+    raw_identity = InstrumentIdentityInput("CN", "SSE", "600000", "CNY")  # type: ignore[arg-type]
+
+    with pytest.raises(MarketRuleError, match="市场"):
+        raw_identity.to_identity()
 
 
 @pytest.mark.parametrize("codes", [[], ["600000"], ["sh60000"], ["xx600000"], ["sh６０００００"]])
@@ -220,7 +246,7 @@ def test_未带市场标识的非唯一显示代码必须拒绝解析() -> None:
 
     候选证券 = [
         InstrumentIdentity(Market.CN, "SZSE", "000001", "CNY"),
-        InstrumentIdentity(Market.HK, "HKEX", "000001", "HKD"),
+        InstrumentIdentity(Market.CN, "SSE", "000001", "CNY"),
     ]
 
     with pytest.raises(MarketRuleError, match="市场|交易所|非唯一"):

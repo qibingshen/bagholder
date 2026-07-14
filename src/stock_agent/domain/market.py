@@ -42,12 +42,33 @@ class InstrumentIdentity:
 
         if not self.exchange or not self.display_code or not self.currency:
             raise MarketRuleError("证券身份必须包含交易所、显示代码和币种")
+        validate_instrument_identity(self)
 
     @property
     def market_timezone(self) -> str:
         """提供证券所属市场的时间边界。"""
 
         return self.market.timezone
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentIdentityInput:
+    """保存尚未通过市场规则校验的原始证券输入，仅供边界层收集失败原因。"""
+
+    market: Market
+    exchange: str
+    display_code: str
+    currency: str
+
+    def to_identity(self) -> InstrumentIdentity:
+        """将原始输入转换为已校验证券身份，不允许绕过正式构造规则。"""
+
+        return InstrumentIdentity(
+            market=self.market,
+            exchange=self.exchange,
+            display_code=self.display_code,
+            currency=self.currency,
+        )
 
 
 class CurrencyComparison:
@@ -98,6 +119,15 @@ def resolve_instrument_identity(
 def validate_instrument_identity(security_id: InstrumentIdentity) -> InstrumentIdentity:
     """验证既有身份的市场、交易所、币种与代码格式组合。"""
 
+    if not isinstance(security_id, InstrumentIdentity):
+        raise MarketRuleError("证券身份无效")
+    if not isinstance(security_id.market, Market):
+        raise MarketRuleError("证券市场必须使用正式市场标识")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (security_id.exchange, security_id.display_code, security_id.currency)
+    ):
+        raise MarketRuleError("证券身份必须包含有效的交易所、显示代码和币种")
     rules = {
         Market.CN: ({"SSE", "SZSE"}, "CNY"),
         Market.HK: ({"HKEX"}, "HKD"),

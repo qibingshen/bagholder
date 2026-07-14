@@ -43,6 +43,7 @@ class MarketStatus(BaseModel):
         if self.trading_calendar_status not in allowed_statuses[self.market]:
             raise ValueError("交易日历状态不受该市场支持")
         _require_aware_time(self.market_time, "市场时间")
+        _require_market_timezone(self.market_time, self.market, "市场时间")
         _require_aware_time(self.collected_at, "采集时间")
         if self.market_time > self.collected_at:
             raise ValueError("市场时间不能晚于采集时间")
@@ -72,11 +73,14 @@ class HistoricalDailyBar(BaseModel):
         """拒绝缺乏可追溯性、币种错配或伪装为实时的历史数据。"""
 
         _require_aware_time(self.market_time, "市场时间")
+        _require_market_timezone(self.market_time, self.security_id.market, "市场时间")
         _require_aware_time(self.collected_at, "采集时间")
         if self.market_time > self.collected_at:
             raise ValueError("市场时间不能晚于采集时间")
         if self.currency != self.security_id.currency:
             raise ValueError("历史日线币种必须与证券身份一致")
+        if self.trade_date != self.market_time.date():
+            raise ValueError("交易日必须与市场时间的本地日期一致")
         if self.freshness.state == "REALTIME":
             raise ValueError("历史日线不得标记为实时行情")
         return self
@@ -147,12 +151,10 @@ class MarketService:
         *,
         market: Market | None = None,
         exchange: str | None = None,
-    ) -> InstrumentIdentity:
-        """从本地目录解析证券；显示代码不唯一时绝不猜测市场。"""
+    ) -> InstrumentCatalogEntry:
+        """从本地目录解析可追溯证券事实，显示代码不唯一时绝不猜测市场。"""
 
-        return self.get_instrument_catalog_entry(
-            display_code, market=market, exchange=exchange
-        ).security_id
+        return self.get_instrument_catalog_entry(display_code, market=market, exchange=exchange)
 
     def get_instrument_catalog_entry(
         self,
@@ -252,3 +254,11 @@ def _require_aware_time(value: datetime, label: str) -> None:
 
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label}必须包含时区")
+
+
+def _require_market_timezone(value: datetime, market: Market, label: str) -> None:
+    """确保市场时点使用对应 IANA 时区，避免以相同偏移误解本地日期。"""
+
+    timezone = value.tzinfo
+    if not isinstance(timezone, ZoneInfo) or timezone.key != market.timezone:
+        raise ValueError(f"{label}必须使用 {market.timezone} 市场时区")

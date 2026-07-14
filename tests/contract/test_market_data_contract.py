@@ -1,6 +1,7 @@
 """验证行情适配器协议与注册表不依赖具体供应商。"""
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from pydantic import ValidationError
@@ -23,21 +24,21 @@ from stock_agent.application.market_service import (
     MarketStatus,
 )
 from stock_agent.contracts.common import Freshness
-from stock_agent.domain.market import InstrumentIdentity, Market
+from stock_agent.domain.market import InstrumentIdentity, InstrumentIdentityInput, Market
 
 
 def 市场证券身份(market: Market) -> InstrumentIdentity:
     """构造仅用于契约测试的完整证券身份。"""
 
-    exchange, currency = {
-        Market.CN: ("SSE", "CNY"),
-        Market.HK: ("HKEX", "HKD"),
-        Market.US: ("NASDAQ", "USD"),
+    exchange, display_code, currency = {
+        Market.CN: ("SSE", "600000", "CNY"),
+        Market.HK: ("HKEX", "00700", "HKD"),
+        Market.US: ("NASDAQ", "AAPL", "USD"),
     }[market]
     return InstrumentIdentity(
         market=market,
         exchange=exchange,
-        display_code="600000",
+        display_code=display_code,
         currency=currency,
     )
 
@@ -369,6 +370,71 @@ def test_证券目录查询返回身份来源时点和版本() -> None:
     assert entry.data_version
 
 
+def test_证券目录解析入口返回完整可追溯目录事实() -> None:
+    """解析入口不得将目录事实降级为无法审计的裸证券身份。"""
+
+    entry = MarketService().resolve_security_identity("600000", market=Market.CN)
+
+    assert isinstance(entry, InstrumentCatalogEntry)
+    assert entry.security_id == 市场证券身份(Market.CN)
+    assert entry.source_id
+    assert entry.collected_at.tzinfo is not None
+    assert entry.data_version
+
+
+@pytest.mark.parametrize("market", [Market.CN, Market.HK, Market.US])
+def test_市场状态市场时间绑定到对应的_IANA_时区(market: Market) -> None:
+    """市场状态的市场时间必须携带所属市场的 IANA 时区，而非仅相同 UTC 偏移。"""
+
+    status = MarketService().get_market_status(market)
+
+    assert isinstance(status.market_time.tzinfo, ZoneInfo)
+    assert status.market_time.tzinfo.key == market.timezone
+
+
+def test_市场状态拒绝仅有相同偏移的非市场_IANA_时区() -> None:
+    """市场状态不得用 UTC 或固定偏移替代所属市场 IANA 时区。"""
+
+    with pytest.raises(ValidationError, match="市场时间.*时区"):
+        MarketStatus(
+            market=Market.CN,
+            market_timezone="Asia/Shanghai",
+            trading_calendar_status="OPEN",
+            market_time=datetime(2026, 7, 14, 1, 30, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 1, 30, 1, tzinfo=UTC),
+            source_id="合同来源",
+            data_version="日历版本-1",
+            freshness=Freshness(state="REALTIME", age_seconds=1),
+        )
+
+
+def test_历史日线拒绝市场时间不是证券所属_IANA_时区() -> None:
+    """UTC 时间戳不能替代日线所属市场的本地交易时点。"""
+
+    payload = 历史日线有效载荷()
+    payload["market_time"] = datetime(2026, 7, 13, 7, 0, tzinfo=UTC)
+
+    with pytest.raises(ValidationError, match="市场时间.*时区"):
+        HistoricalDailyBar(**payload)
+
+
+def test_历史日线拒绝交易日与市场本地日期不一致() -> None:
+    """跨日 UTC 换算不得让日线交易日和所属市场本地日期错位。"""
+
+    payload = 历史日线有效载荷()
+    payload["market_time"] = datetime(2026, 7, 14, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    with pytest.raises(ValidationError, match="交易日.*市场时间"):
+        HistoricalDailyBar(**payload)
+
+
+def test_显式空证券目录不回退内置样例() -> None:
+    """调用方声明本地目录缺失时，查询必须返回明确缺失而不是样例证券。"""
+
+    with pytest.raises(ValueError, match="目录.*不存在|匹配"):
+        MarketService(instruments=[]).resolve_security_identity("600000", market=Market.CN)
+
+
 def test_历史日线包含可追溯字段且不得标为实时() -> None:
     """历史日线应保留身份、复权、币种、来源和版本信息，且不能伪装为实时行情。"""
 
@@ -383,7 +449,7 @@ def test_历史日线包含可追溯字段且不得标为实时() -> None:
         adjustment_basis="NONE",
         currency="CNY",
         source_id="契约来源",
-        market_time=datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+        market_time=datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
         collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         data_version="日线版本-1",
         freshness=Freshness(state="CLOSED", age_seconds=0),
@@ -410,7 +476,7 @@ def test_历史日线拒绝实时新鲜度标记() -> None:
             adjustment_basis="NONE",
             currency="CNY",
             source_id="契约来源",
-            market_time=datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+            market_time=datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
             collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
             data_version="日线版本-1",
             freshness=Freshness(state="REALTIME", age_seconds=0),
@@ -431,7 +497,7 @@ def test_历史日线查询拒绝倒置日期范围() -> None:
 def test_历史日线查询拒绝跨市场不匹配证券代码() -> None:
     """美股身份不得使用A股六码代码，服务必须在查询边界拒绝跨市场代码。"""
 
-    cross_market_security = InstrumentIdentity(
+    cross_market_security = InstrumentIdentityInput(
         market=Market.US,
         exchange="NASDAQ",
         display_code="600000",
@@ -460,7 +526,7 @@ def 历史日线有效载荷() -> dict[str, object]:
         "adjustment_basis": "NONE",
         "currency": "CNY",
         "source_id": "契约来源",
-        "market_time": datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+        "market_time": datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
         "collected_at": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         "data_version": "日线版本-1",
         "freshness": Freshness(state="CLOSED", age_seconds=0),
@@ -591,11 +657,13 @@ def test_各市场接受匹配的证券代码(security_id: InstrumentIdentity) -
 @pytest.mark.parametrize(
     "security_id",
     [
-        InstrumentIdentity(market=Market.CN, exchange="SSE", display_code="AAPL", currency="CNY"),
-        InstrumentIdentity(
+        InstrumentIdentityInput(
+            market=Market.CN, exchange="SSE", display_code="AAPL", currency="CNY"
+        ),
+        InstrumentIdentityInput(
             market=Market.HK, exchange="HKEX", display_code="600000", currency="HKD"
         ),
-        InstrumentIdentity(
+        InstrumentIdentityInput(
             market=Market.US, exchange="NASDAQ", display_code="00700", currency="USD"
         ),
     ],
@@ -610,11 +678,13 @@ def test_各市场拒绝不符合本市场格式的证券代码(security_id: Ins
 @pytest.mark.parametrize(
     "security_id",
     [
-        InstrumentIdentity(
+        InstrumentIdentityInput(
             market=Market.CN, exchange="HKEX", display_code="600000", currency="CNY"
         ),
-        InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="00700", currency="USD"),
-        InstrumentIdentity(
+        InstrumentIdentityInput(
+            market=Market.HK, exchange="HKEX", display_code="00700", currency="USD"
+        ),
+        InstrumentIdentityInput(
             market=Market.US, exchange="NASDAQ", display_code="600000", currency="USD"
         ),
     ],
