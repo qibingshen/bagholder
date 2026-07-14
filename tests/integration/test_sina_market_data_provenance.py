@@ -1,6 +1,5 @@
 """验证新浪原始响应与规范化行情都追加保存到本地事实链。"""
 
-import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -76,9 +75,7 @@ def test_新浪适配器拒绝形态正确但未真实落盘的持久化证明(l
     raw_response = 新浪响应()
     proof = SinaPersistenceProof(
         raw_artifact_version_id="raw-1",
-        raw_content_hash=hashlib.sha256(raw_response).hexdigest(),
         normalized_artifact_version_id="normalized-1",
-        normalized_content_hash="1" * 64,
         parent_version_id="raw-1",
     )
 
@@ -96,44 +93,30 @@ def test_新浪适配器拒绝形态正确但未真实落盘的持久化证明(l
         adapter.fetch_quotes(["sh600000"], datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC))
 
 
-@pytest.mark.parametrize("tamper", ["normalized_hash", "parent_version"])
-def test_新浪适配器拒绝哈希或父版本关联不匹配的真实工件(local_data_root: Path, tamper: str) -> None:
-    """真实落盘后仍必须回读校验规范化哈希和父版本关联。"""
+def test_新浪适配器拒绝父版本关联不匹配的真实工件(local_data_root: Path) -> None:
+    """真实落盘后仍必须回读校验父版本关联。"""
 
     service = VersioningService(local_data_root)
-    recorder = SinaMarketDataFactRecorder(service)
 
     class 篡改证明记录器:
-        def record(self, raw_response: bytes, quotes: list[object]) -> SinaPersistenceProof:
-            if tamper == "parent_version":
-                raw = service.commit_bytes(
-                    dataset="market-data-raw",
-                    version_id="raw-1",
-                    content=raw_response,
-                    source_id="sina",
-                )
-                normalized_content = b'{"source_id":"sina"}'
-                normalized = service.commit_bytes(
-                    dataset="market-data-normalized",
-                    version_id="normalized-1",
-                    content=normalized_content,
-                    source_id="sina",
-                    parent_version_id="other-raw",
-                )
-                return SinaPersistenceProof(
-                    raw_artifact_version_id=raw.version_id,
-                    raw_content_hash=raw.content_hash,
-                    normalized_artifact_version_id=normalized.version_id,
-                    normalized_content_hash=normalized.content_hash,
-                    parent_version_id=raw.version_id,
-                )
-            proof = recorder.record(raw_response, quotes)
+        def record(self, raw_response: bytes, normalized_content: bytes) -> SinaPersistenceProof:
+            raw = service.commit_bytes(
+                dataset="market-data-raw",
+                version_id="raw-1",
+                content=raw_response,
+                source_id="sina",
+            )
+            normalized = service.commit_bytes(
+                dataset="market-data-normalized",
+                version_id="normalized-1",
+                content=normalized_content,
+                source_id="sina",
+                parent_version_id="other-raw",
+            )
             return SinaPersistenceProof(
-                raw_artifact_version_id=proof.raw_artifact_version_id,
-                raw_content_hash=proof.raw_content_hash,
-                normalized_artifact_version_id=proof.normalized_artifact_version_id,
-                normalized_content_hash="0" * 64,
-                parent_version_id=proof.parent_version_id,
+                raw_artifact_version_id=raw.version_id,
+                normalized_artifact_version_id=normalized.version_id,
+                parent_version_id=raw.version_id,
             )
 
     adapter = SinaHttpAdapter(
@@ -152,9 +135,7 @@ def test_新浪适配器拒绝哈希或父版本关联不匹配的真实工件(l
         None,
         SinaPersistenceProof(
             raw_artifact_version_id="raw-1",
-            raw_content_hash="0" * 64,
             normalized_artifact_version_id="normalized-1",
-            normalized_content_hash="1" * 64,
             parent_version_id="other-raw",
         ),
     ],
@@ -165,7 +146,9 @@ def test_新浪适配器拒绝缺失或不完整的持久化证明(
     """公共适配器不能信任空记录器；原始与规范化工件证明必须完整关联。"""
 
     class 返回证明的记录器:
-        def record(self, raw_response: bytes, quotes: list[object]) -> SinaPersistenceProof | None:
+        def record(
+            self, raw_response: bytes, normalized_content: bytes
+        ) -> SinaPersistenceProof | None:
             return proof
 
     adapter = SinaHttpAdapter(
@@ -175,4 +158,49 @@ def test_新浪适配器拒绝缺失或不完整的持久化证明(
     )
 
     with pytest.raises(SinaDataSourceError, match="证明"):
+        adapter.fetch_quotes(["sh600000"], datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    "normalized_content",
+    [
+        b'{"source_id":"sina","quotes":[]}',
+        b'{"source_id":"sina","quotes":[{"price":1.0}]}',
+    ],
+)
+def test_新浪适配器拒绝父链正确但不属于当前报价批次的规范化工件(
+    normalized_content: bytes, local_data_root: Path
+) -> None:
+    """规范化工件必须精确承载本次适配器生成的完整报价批次。"""
+
+    service = VersioningService(local_data_root)
+
+    class 写入旧批次的记录器:
+        def record(self, raw_response: bytes, normalized_payload: bytes) -> SinaPersistenceProof:
+            raw = service.commit_bytes(
+                dataset="market-data-raw",
+                version_id="raw-1",
+                content=raw_response,
+                source_id="sina",
+            )
+            normalized = service.commit_bytes(
+                dataset="market-data-normalized",
+                version_id="normalized-1",
+                content=normalized_content,
+                source_id="sina",
+                parent_version_id=raw.version_id,
+            )
+            return SinaPersistenceProof(
+                raw_artifact_version_id=raw.version_id,
+                normalized_artifact_version_id=normalized.version_id,
+                parent_version_id=raw.version_id,
+            )
+
+    adapter = SinaHttpAdapter(
+        lambda _url: 新浪响应(),
+        fact_recorder=写入旧批次的记录器(),
+        versioning_service=service,
+    )
+
+    with pytest.raises(SinaDataSourceError, match="规范化"):
         adapter.fetch_quotes(["sh600000"], datetime(2026, 7, 14, 1, 30, 3, tzinfo=UTC))

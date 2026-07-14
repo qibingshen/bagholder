@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Callable, Sequence
@@ -34,19 +35,15 @@ class SinaPersistenceProof:
     """描述已追加提交的原始和规范化行情工件及其版本关联。"""
 
     raw_artifact_version_id: str
-    raw_content_hash: str
     normalized_artifact_version_id: str
-    normalized_content_hash: str
     parent_version_id: str
 
 
 class SinaFactRecorder(Protocol):
     """定义新浪行情事实记录端口，适配器不直接依赖具体本地实现。"""
 
-    def record(
-        self, raw_response: bytes, quotes: Sequence[NormalizedQuote]
-    ) -> SinaPersistenceProof:
-        """追加保存同一批原始响应与规范化行情，并返回可校验的持久化证明。"""
+    def record(self, raw_response: bytes, normalized_content: bytes) -> SinaPersistenceProof:
+        """追加保存适配器生成的原始响应与规范化批次，并返回工件关联。"""
 
 
 class SinaHttpAdapter:
@@ -87,9 +84,11 @@ class SinaHttpAdapter:
                 self._normalize_quote(code, parsed_fields[code], collected_at, data_version)
                 for code in codes
             ]
-            proof = self._fact_recorder.record(raw_response, quotes)
-            self._validate_persistence_proof(proof, raw_response)
-            self._verify_persisted_artifacts(proof)
+            normalized_content = self._serialize_normalized_batch(quotes)
+            normalized_content_hash = hashlib.sha256(normalized_content).hexdigest()
+            proof = self._fact_recorder.record(raw_response, normalized_content)
+            self._validate_persistence_proof(proof)
+            self._verify_persisted_artifacts(proof, raw_response, normalized_content_hash)
             return quotes
         except SinaDataSourceError:
             raise
@@ -97,7 +96,7 @@ class SinaHttpAdapter:
             raise SinaDataSourceError("新浪行情响应或本地事实保存无效，拒绝生成量化行情") from error
 
     @staticmethod
-    def _validate_persistence_proof(proof: SinaPersistenceProof, raw_response: bytes) -> None:
+    def _validate_persistence_proof(proof: SinaPersistenceProof) -> None:
         """确认记录器返回了完整的原始、规范化工件与父版本关联证明。"""
 
         if not isinstance(proof, SinaPersistenceProof):
@@ -106,15 +105,15 @@ class SinaHttpAdapter:
             not proof.raw_artifact_version_id
             or not proof.normalized_artifact_version_id
             or proof.parent_version_id != proof.raw_artifact_version_id
-            or proof.raw_content_hash != hashlib.sha256(raw_response).hexdigest()
-            or len(proof.normalized_content_hash) != 64
-            or any(
-                character not in "0123456789abcdef" for character in proof.normalized_content_hash
-            )
         ):
             raise SinaDataSourceError("新浪事实保存返回的持久化证明不完整")
 
-    def _verify_persisted_artifacts(self, proof: SinaPersistenceProof) -> None:
+    def _verify_persisted_artifacts(
+        self,
+        proof: SinaPersistenceProof,
+        raw_response: bytes,
+        normalized_content_hash: str,
+    ) -> None:
         """从既有版本服务回读工件和元数据，拒绝仅形态正确的伪造证明。"""
 
         raw_dataset = "market-data-raw"
@@ -137,11 +136,34 @@ class SinaHttpAdapter:
             normalized_dataset, proof.normalized_artifact_version_id
         )
         if (
-            hashlib.sha256(raw_content).hexdigest() != proof.raw_content_hash
-            or hashlib.sha256(normalized_content).hexdigest() != proof.normalized_content_hash
+            hashlib.sha256(raw_content).hexdigest() != hashlib.sha256(raw_response).hexdigest()
+            or hashlib.sha256(normalized_content).hexdigest() != normalized_content_hash
             or normalized_metadata["parent_version_id"] != proof.raw_artifact_version_id
         ):
-            raise SinaDataSourceError("新浪事实工件哈希或父版本关联不匹配")
+            raise SinaDataSourceError("新浪事实工件与当前规范化报价批次或父版本关联不匹配")
+
+    @staticmethod
+    def _serialize_normalized_batch(quotes: Sequence[NormalizedQuote]) -> bytes:
+        """确定性序列化当前返回的完整报价批次，作为回读校验的唯一事实载荷。"""
+
+        if not quotes:
+            raise SinaDataSourceError("新浪规范化报价批次不能为空")
+        first = quotes[0]
+        if any(
+            quote.source_id != first.source_id or quote.data_version != first.data_version
+            for quote in quotes
+        ):
+            raise SinaDataSourceError("新浪规范化报价批次的来源或数据版本不一致")
+        return json.dumps(
+            {
+                "data_version": first.data_version,
+                "quotes": [quote.model_dump(mode="json") for quote in quotes],
+                "source_id": first.source_id,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
 
     @staticmethod
     def _validate_codes(codes: list[str]) -> None:

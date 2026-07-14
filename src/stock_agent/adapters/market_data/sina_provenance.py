@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
-from collections.abc import Sequence
+from datetime import UTC, datetime
 
-from stock_agent.adapters.market_data.base import NormalizedQuote
 from stock_agent.adapters.market_data.sina_adapter import SinaPersistenceProof
 from stock_agent.application.versioning_service import VersioningService
 
@@ -19,22 +17,13 @@ class SinaMarketDataFactRecorder:
 
         self._versioning_service = versioning_service
 
-    def record(
-        self, raw_response: bytes, quotes: Sequence[NormalizedQuote]
-    ) -> SinaPersistenceProof:
-        """先提交原始字节，再提交引用其版本与哈希的规范化结果。"""
+    def record(self, raw_response: bytes, normalized_content: bytes) -> SinaPersistenceProof:
+        """先提交原始字节，再原样提交适配器提供的规范化事实载荷。"""
 
-        if not quotes:
-            raise ValueError("没有规范化行情时不能建立新浪事实记录")
-        first = quotes[0]
-        if any(
-            quote.source_id != "sina" or quote.data_version != first.data_version
-            for quote in quotes
-        ):
-            raise ValueError("新浪事实记录必须来自同一来源和数据版本")
-
+        if not normalized_content:
+            raise ValueError("规范化事实载荷不能为空")
         raw_hash = hashlib.sha256(raw_response).hexdigest()
-        suffix = first.collected_at.astimezone().strftime("%Y%m%dT%H%M%S%f%z")
+        suffix = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f%z")
         version_prefix = raw_hash[:16]
         raw_version_id = f"sina-{version_prefix}-raw-{suffix}"
         raw = self._versioning_service.commit_bytes(
@@ -45,18 +34,6 @@ class SinaMarketDataFactRecorder:
             expected_hash=raw_hash,
         )
         normalized_version_id = f"sina-{version_prefix}-normalized-{suffix}"
-        normalized_content = json.dumps(
-            {
-                "source_id": "sina",
-                "data_version": first.data_version,
-                "raw_artifact_version_id": raw.version_id,
-                "raw_content_hash": raw.content_hash,
-                "collected_at": first.collected_at.isoformat(),
-                "quotes": [quote.model_dump(mode="json") for quote in quotes],
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
         normalized = self._versioning_service.commit_bytes(
             dataset="market-data-normalized",
             version_id=normalized_version_id,
@@ -66,8 +43,6 @@ class SinaMarketDataFactRecorder:
         )
         return SinaPersistenceProof(
             raw_artifact_version_id=raw.version_id,
-            raw_content_hash=raw.content_hash,
             normalized_artifact_version_id=normalized.version_id,
-            normalized_content_hash=normalized.content_hash,
             parent_version_id=normalized.parent_version_id or "",
         )
