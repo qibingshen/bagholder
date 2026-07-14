@@ -18,7 +18,7 @@ class SinaMarketDataFactRecorder:
         self._versioning_service = versioning_service
 
     def record(self, raw_response: bytes, normalized_content: bytes) -> SinaPersistenceProof:
-        """先提交原始字节，再原样提交适配器提供的规范化事实载荷。"""
+        """以同一批次公开原始字节和规范化事实载荷。"""
 
         if not normalized_content:
             raise ValueError("规范化事实载荷不能为空")
@@ -26,20 +26,25 @@ class SinaMarketDataFactRecorder:
         suffix = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f%z")
         version_prefix = raw_hash[:16]
         raw_version_id = f"sina-{version_prefix}-raw-{suffix}"
-        raw = self._versioning_service.commit_bytes(
-            dataset="market-data-raw",
-            version_id=raw_version_id,
-            content=raw_response,
-            source_id="sina",
-            expected_hash=raw_hash,
-        )
         normalized_version_id = f"sina-{version_prefix}-normalized-{suffix}"
-        normalized = self._versioning_service.commit_bytes(
-            dataset="market-data-normalized",
-            version_id=normalized_version_id,
-            content=normalized_content,
-            source_id="sina",
-            parent_version_id=raw.version_id,
+        raw, normalized = self._versioning_service.commit_batch(
+            batch_id=f"sina-{version_prefix}-{suffix}",
+            items=[
+                {
+                    "dataset": "market-data-raw",
+                    "version_id": raw_version_id,
+                    "content": raw_response,
+                    "source_id": "sina",
+                    "expected_hash": raw_hash,
+                },
+                {
+                    "dataset": "market-data-normalized",
+                    "version_id": normalized_version_id,
+                    "content": normalized_content,
+                    "source_id": "sina",
+                    "parent_version_id": raw_version_id,
+                },
+            ],
         )
         return SinaPersistenceProof(
             raw_artifact_version_id=raw.version_id,

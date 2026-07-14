@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -72,8 +73,9 @@ class VersioningService:
         """暂存整批工件，最后仅写一个批次完成标记以原子公开。"""
         if not batch_id or not items:
             raise ValueError("批次标识和工件不能为空")
-        journal = self._batch_directory(batch_id) / "manifest.json"
-        if journal.exists() or (self._batch_directory(batch_id) / "_COMPLETE").exists():
+        batch_directory = self._batch_directory(batch_id)
+        journal = batch_directory / "manifest.json"
+        if journal.exists() or (batch_directory / "_COMPLETE").exists():
             raise ImmutableVersionError("批次标识不允许重复使用")
         entries = []
         for item in items:
@@ -91,16 +93,16 @@ class VersioningService:
                     "content_hash": self._validate_hash(content, item.get("expected_hash")),
                 }
             )
-        batch_directory = self._batch_directory(batch_id)
         batch_directory.mkdir(parents=True, exist_ok=False)
-        journal.write_text(json.dumps({"entries": entries}, sort_keys=True), encoding="utf-8")
+        self._write_journal_atomically(journal, entries)
         committed: list[CommittedVersion] = []
         try:
             for item, entry in zip(items, entries, strict=True):
                 artifact = self._artifacts.write_artifact(
                     entry["dataset"], entry["version_id"], item["content"], complete=False
                 )
-                self._metadata.register_version(
+                self._metadata.register_batch_version(
+                    batch_id,
                     entry["dataset"],
                     entry["version_id"],
                     artifact.content_hash,
@@ -138,11 +140,13 @@ class VersioningService:
 
     def rollback_batch(self, batch_id: str) -> None:
         """删除未完成批次的工件和元数据；失败日志留待下次启动继续恢复。"""
-        manifest = self._batch_directory(batch_id) / "manifest.json"
-        if manifest.exists():
-            for entry in json.loads(manifest.read_text(encoding="utf-8"))["entries"]:
-                self.rollback_versions((entry["dataset"], entry["version_id"]))
-        shutil.rmtree(self._batch_directory(batch_id), ignore_errors=False)
+        batch_directory = self._batch_directory(batch_id)
+        versions = set(self._metadata.batch_versions(batch_id))
+        versions.update(self._journal_versions(batch_directory / "manifest.json"))
+        if versions:
+            self.rollback_versions(*versions)
+        self._metadata.delete_batch_versions(batch_id)
+        shutil.rmtree(batch_directory, ignore_errors=False)
         if self._batches_root.exists() and not any(self._batches_root.iterdir()):
             self._batches_root.rmdir()
 
@@ -165,7 +169,10 @@ class VersioningService:
         if not self._batches_root.exists():
             return
         for directory in list(self._batches_root.iterdir()):
-            if directory.is_dir() and not (directory / "_COMPLETE").is_file():
+            if directory.is_dir() and (
+                not (directory / "_COMPLETE").is_file()
+                or not self._journal_is_valid(directory / "manifest.json")
+            ):
                 self.rollback_batch(directory.name)
 
     def _completed_batch_contains(self, dataset: str, version_id: str) -> bool:
@@ -175,7 +182,9 @@ class VersioningService:
             manifest = directory / "manifest.json"
             if not (directory / "_COMPLETE").is_file() or not manifest.is_file():
                 continue
-            entries = json.loads(manifest.read_text(encoding="utf-8"))["entries"]
+            if not self._journal_is_valid(manifest):
+                continue
+            entries = self._journal_entries(manifest)
             if any(
                 entry["dataset"] == dataset and entry["version_id"] == version_id
                 for entry in entries
@@ -185,6 +194,45 @@ class VersioningService:
 
     def _batch_directory(self, batch_id: str) -> Path:
         return self._batches_root / batch_id
+
+    @staticmethod
+    def _write_journal_atomically(journal: Path, entries: list[dict[str, Any]]) -> None:
+        temporary = journal.with_name(f".{journal.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(json.dumps({"entries": entries}, sort_keys=True), encoding="utf-8")
+            temporary.replace(journal)
+        finally:
+            if temporary.exists():
+                temporary.unlink()
+
+    @classmethod
+    def _journal_is_valid(cls, manifest: Path) -> bool:
+        try:
+            cls._journal_entries(manifest)
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return False
+        return True
+
+    @staticmethod
+    def _journal_entries(manifest: Path) -> list[dict[str, Any]]:
+        entries = json.loads(manifest.read_text(encoding="utf-8"))["entries"]
+        if not isinstance(entries, list) or any(
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("dataset"), str)
+            or not isinstance(entry.get("version_id"), str)
+            for entry in entries
+        ):
+            raise ValueError("批次日志条目无效")
+        return entries
+
+    @classmethod
+    def _journal_versions(cls, manifest: Path) -> set[tuple[str, str]]:
+        try:
+            return {
+                (entry["dataset"], entry["version_id"]) for entry in cls._journal_entries(manifest)
+            }
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            return set()
 
     @staticmethod
     def _validate_hash(content: bytes, expected_hash: str | None) -> str:

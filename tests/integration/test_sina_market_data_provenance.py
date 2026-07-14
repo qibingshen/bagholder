@@ -52,6 +52,31 @@ def test_新浪响应和规范化结果以同一版本关联追加保存(local_d
     )
 
 
+def test_新浪记录器规范化工件写入失败时原始和规范化均不残留(
+    local_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实记录器必须将一对工件作为同一批次发布，失败时不得留下半批次。"""
+
+    service = VersioningService(local_data_root)
+    原写入 = service._artifacts.write_artifact
+
+    def 拒绝规范化工件(dataset: str, *参数: object, **关键字参数: object):
+        if dataset == "market-data-normalized":
+            raise OSError("规范化工件写入失败")
+        return 原写入(dataset, *参数, **关键字参数)
+
+    monkeypatch.setattr(service._artifacts, "write_artifact", 拒绝规范化工件)
+
+    with pytest.raises(OSError, match="规范化工件写入失败"):
+        SinaMarketDataFactRecorder(service).record(新浪响应(), b'{"quotes":[]}')
+
+    assert not (local_data_root / "artifacts" / "market-data-raw").exists()
+    assert not (local_data_root / "artifacts" / "market-data-normalized").exists()
+    assert service._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
+
+
 def test_新浪事实保存失败时不返回未持久化行情(local_data_root: Path) -> None:
     """事实链提交失败必须使整批读取失败，不能把内存结果冒充事实。"""
 
