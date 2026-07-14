@@ -118,6 +118,12 @@ def test_历史日线将注入响应追加保存为原始与规范化工件并�
     assert 规范化批次["bars"][0]["source_data_version"] == "sina-固定历史响应-1"
     assert 规范化批次["bars"][0]["adjustment_basis"] == "none"
     assert 规范化批次["bars"][0]["artifact_version_id"] == 结果.normalized_version_id
+    assert 规范化批次["security_code"] == "600000"
+    assert 规范化批次["display_code"] == "600000"
+    assert 规范化批次["exchange"] == "SSE"
+    assert 规范化批次["currency"] == "CNY"
+    assert 规范化批次["bars"][0]["security_code"] == "600000"
+    assert 规范化批次["bars"][0]["exchange"] == "SSE"
     assert 规范化批次["source_data_version"] == "sina-固定历史响应-1"
     assert 规范化批次["artifact_version_id"] == 结果.normalized_version_id
     assert 元数据["parent_version_id"] == 结果.raw_version_id

@@ -69,3 +69,13 @@ class DuckDbMetadataStore:
         if row is None:
             raise KeyError(version_id)
         return {"content_hash": row[0], "parent_version_id": row[1]}
+
+    def has_version(self, dataset: str, version_id: str) -> bool:
+        """确认元数据已登记，避免仅凭完成标记暴露半提交工件。"""
+        return (
+            self._connection.execute(
+                "SELECT 1 FROM dataset_versions WHERE dataset = ? AND version_id = ?",
+                [dataset, version_id],
+            ).fetchone()
+            is not None
+        )

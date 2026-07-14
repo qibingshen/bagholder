@@ -198,12 +198,20 @@ class HistoricalDailyIngestionWorker:
         document = {
             "source_id": source_id,
             "market": security_id.market.value,
+            "security_code": security_id.display_code,
+            "display_code": security_id.display_code,
+            "exchange": security_id.exchange,
+            "currency": security_id.currency,
             "market_time": payload["market_time"],
             "collected_at": collected_at.isoformat(),
             "source_data_version": payload["source_data_version"],
             "artifact_version_id": normalized_version_id,
             "bars": [
                 {
+                    "market": security_id.market.value,
+                    "security_code": security_id.display_code,
+                    "display_code": security_id.display_code,
+                    "exchange": security_id.exchange,
                     "trade_date": bar.trade_date.isoformat(),
                     "market_time": bar.market_time.isoformat(),
                     "open": bar.open,

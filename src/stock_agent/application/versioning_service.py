@@ -40,7 +40,9 @@ class VersioningService:
 
     def version_exists(self, dataset: str, version_id: str) -> bool:
         """只把单版本完成标记或已完成批次中的版本视为可查询。"""
-        if (self._root / "artifacts" / dataset / version_id / "_COMPLETE").is_file():
+        if (
+            self._root / "artifacts" / dataset / version_id / "_COMPLETE"
+        ).is_file() and self._metadata.has_version(dataset, version_id):
             return True
         return self._completed_batch_contains(dataset, version_id)
 
@@ -59,13 +61,29 @@ class VersioningService:
         if self.version_exists(dataset, version_id):
             raise ImmutableVersionError("已提交版本不允许静默覆盖")
         digest = self._validate_hash(content, expected_hash)
-        artifact = self._artifacts.write_artifact(dataset, version_id, content)
+        batch_id = f"single-{uuid.uuid4().hex}"
+        entries = [
+            {
+                "dataset": dataset,
+                "version_id": version_id,
+                "parent_version_id": parent_version_id,
+                "content_hash": digest,
+            }
+        ]
+        batch_directory = self._create_batch_directory(batch_id, entries)
         try:
-            self._metadata.register_version(
-                dataset, version_id, artifact.content_hash, parent_version_id
+            artifact = self._artifacts.write_artifact(dataset, version_id, content, complete=False)
+            self._metadata.register_batch_version(
+                batch_id, dataset, version_id, artifact.content_hash, parent_version_id
             )
+            artifact.complete_marker.touch()
+            (batch_directory / "_COMPLETE").touch()
         except Exception:
-            self.rollback_versions((dataset, version_id))
+            try:
+                self.rollback_batch(batch_id)
+            except Exception:
+                # 暂存清单会在下一次启动时清理，保留原始提交失败原因。
+                pass
             raise
         return CommittedVersion(dataset, version_id, parent_version_id, digest)
 
@@ -93,8 +111,7 @@ class VersioningService:
                     "content_hash": self._validate_hash(content, item.get("expected_hash")),
                 }
             )
-        batch_directory.mkdir(parents=True, exist_ok=False)
-        self._write_journal_atomically(journal, entries)
+        self._create_batch_directory(batch_id, entries)
         committed: list[CommittedVersion] = []
         try:
             for item, entry in zip(items, entries, strict=True):
@@ -142,6 +159,7 @@ class VersioningService:
         """删除未完成批次的工件和元数据；失败日志留待下次启动继续恢复。"""
         batch_directory = self._batch_directory(batch_id)
         versions = set(self._metadata.batch_versions(batch_id))
+        versions.update(self._journal_versions(batch_directory / "recovery.json"))
         versions.update(self._journal_versions(batch_directory / "manifest.json"))
         if versions:
             self.rollback_versions(*versions)
@@ -171,7 +189,7 @@ class VersioningService:
         for directory in list(self._batches_root.iterdir()):
             if directory.is_dir() and (
                 not (directory / "_COMPLETE").is_file()
-                or not self._journal_is_valid(directory / "manifest.json")
+                or not self._journal_is_valid(directory / "recovery.json")
             ):
                 self.rollback_batch(directory.name)
 
@@ -179,8 +197,12 @@ class VersioningService:
         if not self._batches_root.exists():
             return False
         for directory in self._batches_root.iterdir():
-            manifest = directory / "manifest.json"
-            if not (directory / "_COMPLETE").is_file() or not manifest.is_file():
+            manifest = directory / "recovery.json"
+            if (
+                not (directory / "_COMPLETE").is_file()
+                or not manifest.is_file()
+                or not self._metadata.has_version(dataset, version_id)
+            ):
                 continue
             if not self._journal_is_valid(manifest):
                 continue
@@ -189,11 +211,26 @@ class VersioningService:
                 entry["dataset"] == dataset and entry["version_id"] == version_id
                 for entry in entries
             ):
+                if (
+                    len(entries) == 1
+                    and not (
+                        self._root / "artifacts" / dataset / version_id / "_COMPLETE"
+                    ).is_file()
+                ):
+                    continue
                 return True
         return False
 
     def _batch_directory(self, batch_id: str) -> Path:
         return self._batches_root / batch_id
+
+    def _create_batch_directory(self, batch_id: str, entries: list[dict[str, Any]]) -> Path:
+        """先原子落盘完整恢复清单，再开始写入任何工件或元数据。"""
+        batch_directory = self._batch_directory(batch_id)
+        batch_directory.mkdir(parents=True, exist_ok=False)
+        self._write_journal_atomically(batch_directory / "recovery.json", entries)
+        self._write_journal_atomically(batch_directory / "manifest.json", entries)
+        return batch_directory
 
     @staticmethod
     def _write_journal_atomically(journal: Path, entries: list[dict[str, Any]]) -> None:
@@ -216,11 +253,15 @@ class VersioningService:
     @staticmethod
     def _journal_entries(manifest: Path) -> list[dict[str, Any]]:
         entries = json.loads(manifest.read_text(encoding="utf-8"))["entries"]
-        if not isinstance(entries, list) or any(
-            not isinstance(entry, dict)
-            or not isinstance(entry.get("dataset"), str)
-            or not isinstance(entry.get("version_id"), str)
-            for entry in entries
+        if (
+            not entries
+            or not isinstance(entries, list)
+            or any(
+                not isinstance(entry, dict)
+                or not isinstance(entry.get("dataset"), str)
+                or not isinstance(entry.get("version_id"), str)
+                for entry in entries
+            )
         ):
             raise ValueError("批次日志条目无效")
         return entries

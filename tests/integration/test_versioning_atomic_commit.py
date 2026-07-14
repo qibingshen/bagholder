@@ -99,3 +99,108 @@ def test_启动恢复损坏批次日志时清理元数据和双方工件(local_d
     assert recovered._metadata._connection.execute(
         "SELECT COUNT(*) FROM dataset_versions"
     ).fetchone() == (0,)
+
+
+def test_single_commit_marker_failure_is_invisible_and_recovered(
+    local_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """元数据已登记但完成标记未公开时不得读取半提交。"""
+    from stock_agent.application.versioning_service import VersioningService
+
+    service = VersioningService(local_data_root)
+    original_touch = Path.touch
+
+    def reject_single_complete_marker(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "_COMPLETE" and ".batches" not in path.parts:
+            raise OSError("单工件完成标记失败")
+        original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", reject_single_complete_marker)
+    with pytest.raises(OSError, match="完成标记"):
+        service.commit_bytes(
+            dataset="daily-bars", version_id="v1", content=b"payload", source_id="test-source"
+        )
+
+    assert not service.version_exists("daily-bars", "v1")
+    with pytest.raises(KeyError):
+        service.read_bytes("daily-bars", "v1")
+    with pytest.raises(KeyError):
+        service.metadata_for("daily-bars", "v1")
+
+    recovered = VersioningService(local_data_root)
+    assert not (local_data_root / "artifacts" / "daily-bars").exists()
+    assert recovered._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
+
+
+def test_interrupted_single_commit_is_recovered_on_next_startup(
+    local_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """进程在补偿前中断时，下一次启动仍能从暂存目录清理全部残留。"""
+    from stock_agent.application.versioning_service import VersioningService
+
+    service = VersioningService(local_data_root)
+    original_touch = Path.touch
+
+    def reject_single_complete_marker(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "_COMPLETE" and ".batches" not in path.parts:
+            raise OSError("单工件完成标记失败")
+        original_touch(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "touch", reject_single_complete_marker)
+
+    def reject_rollback(_batch_id: str) -> None:
+        raise OSError("进程中断")
+
+    monkeypatch.setattr(service, "rollback_batch", reject_rollback)
+    with pytest.raises(OSError, match="完成标记"):
+        service.commit_bytes(
+            dataset="daily-bars", version_id="v1", content=b"payload", source_id="test-source"
+        )
+
+    assert not service.version_exists("daily-bars", "v1")
+    recovered = VersioningService(local_data_root)
+    assert not (local_data_root / "artifacts" / "daily-bars").exists()
+    assert recovered._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("damaged_journal", ["{}", '{"entries":['])
+def test_damaged_or_empty_journal_without_batch_index_uses_staging_manifest_for_recovery(
+    local_data_root: Path, damaged_journal: str
+) -> None:
+    """恢复以暂存目录中的原子清单为准，不能依赖已登记批次索引。"""
+    import json
+
+    from stock_agent.application.versioning_service import VersioningService
+
+    service = VersioningService(local_data_root)
+    batch_directory = local_data_root / ".batches" / "无索引损坏批次"
+    batch_directory.mkdir(parents=True)
+    entries = [
+        {"dataset": "market-data-raw", "version_id": "raw-1", "parent_version_id": None},
+        {
+            "dataset": "market-data-normalized",
+            "version_id": "normalized-1",
+            "parent_version_id": "raw-1",
+        },
+    ]
+    batch_directory.joinpath("recovery.json").write_text(
+        json.dumps({"entries": entries}), encoding="utf-8"
+    )
+    batch_directory.joinpath("manifest.json").write_text(damaged_journal, encoding="utf-8")
+    for entry in entries:
+        service._artifacts.write_artifact(
+            entry["dataset"], entry["version_id"], b"payload", complete=False
+        )
+
+    recovered = VersioningService(local_data_root)
+
+    assert not batch_directory.exists()
+    assert not (local_data_root / "artifacts" / "market-data-raw").exists()
+    assert not (local_data_root / "artifacts" / "market-data-normalized").exists()
+    assert recovered._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
