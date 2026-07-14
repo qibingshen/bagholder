@@ -16,7 +16,12 @@ from stock_agent.adapters.market_data.registry import (
     SourceCapabilityViolationError,
     UnknownSourceError,
 )
-from stock_agent.application.market_service import HistoricalDailyBar, MarketService, MarketStatus
+from stock_agent.application.market_service import (
+    HistoricalDailyBar,
+    InstrumentCatalogEntry,
+    MarketService,
+    MarketStatus,
+)
 from stock_agent.contracts.common import Freshness
 from stock_agent.domain.market import InstrumentIdentity, Market
 
@@ -345,6 +350,25 @@ def test_市场状态拒绝缺失市场时点或采集时点(field: str) -> None
         MarketStatus(**payload)
 
 
+def test_市场状态查询拒绝缺少传入的本地日历事实() -> None:
+    """调用方显式提供空本地日历时，服务不得回退到内置样例掩盖数据缺失。"""
+
+    with pytest.raises(ValueError, match="缺少.*日历状态|采集时间"):
+        MarketService(market_statuses=[]).get_market_status(Market.CN)
+
+
+def test_证券目录查询返回身份来源时点和版本() -> None:
+    """目录身份必须能追溯到本地事实来源、采集时间和版本，不能只返回裸代码。"""
+
+    entry = MarketService().get_instrument_catalog_entry("600000", market=Market.CN)
+
+    assert isinstance(entry, InstrumentCatalogEntry)
+    assert entry.security_id == 市场证券身份(Market.CN)
+    assert entry.source_id
+    assert entry.collected_at.tzinfo is not None
+    assert entry.data_version
+
+
 def test_历史日线包含可追溯字段且不得标为实时() -> None:
     """历史日线应保留身份、复权、币种、来源和版本信息，且不能伪装为实时行情。"""
 
@@ -528,7 +552,11 @@ def test_历史日线拒绝必填字段空值(field: str, invalid_value: object)
     ("market", "expected_timezone", "allowed_calendar_statuses"),
     [
         (Market.CN, "Asia/Shanghai", {"OPEN", "CLOSED", "MIDDAY_BREAK", "HOLIDAY"}),
-        (Market.HK, "Asia/Hong_Kong", {"OPEN", "CLOSED", "MIDDAY_BREAK", "HOLIDAY", "TYPHOON_SUSPENDED"}),
+        (
+            Market.HK,
+            "Asia/Hong_Kong",
+            {"OPEN", "CLOSED", "MIDDAY_BREAK", "HOLIDAY", "TYPHOON_SUSPENDED"},
+        ),
         (Market.US, "America/New_York", {"OPEN", "CLOSED", "PRE_MARKET", "AFTER_HOURS", "HOLIDAY"}),
     ],
 )
@@ -549,7 +577,9 @@ def test_各市场状态锁定时区与允许交易日历状态(
     [
         InstrumentIdentity(market=Market.CN, exchange="SSE", display_code="600000", currency="CNY"),
         InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="00700", currency="HKD"),
-        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="AAPL", currency="USD"),
+        InstrumentIdentity(
+            market=Market.US, exchange="NASDAQ", display_code="AAPL", currency="USD"
+        ),
     ],
 )
 def test_各市场接受匹配的证券代码(security_id: InstrumentIdentity) -> None:
@@ -562,8 +592,12 @@ def test_各市场接受匹配的证券代码(security_id: InstrumentIdentity) -
     "security_id",
     [
         InstrumentIdentity(market=Market.CN, exchange="SSE", display_code="AAPL", currency="CNY"),
-        InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="600000", currency="HKD"),
-        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="00700", currency="USD"),
+        InstrumentIdentity(
+            market=Market.HK, exchange="HKEX", display_code="600000", currency="HKD"
+        ),
+        InstrumentIdentity(
+            market=Market.US, exchange="NASDAQ", display_code="00700", currency="USD"
+        ),
     ],
 )
 def test_各市场拒绝不符合本市场格式的证券代码(security_id: InstrumentIdentity) -> None:
@@ -576,9 +610,13 @@ def test_各市场拒绝不符合本市场格式的证券代码(security_id: Ins
 @pytest.mark.parametrize(
     "security_id",
     [
-        InstrumentIdentity(market=Market.CN, exchange="HKEX", display_code="600000", currency="CNY"),
+        InstrumentIdentity(
+            market=Market.CN, exchange="HKEX", display_code="600000", currency="CNY"
+        ),
         InstrumentIdentity(market=Market.HK, exchange="HKEX", display_code="00700", currency="USD"),
-        InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="600000", currency="USD"),
+        InstrumentIdentity(
+            market=Market.US, exchange="NASDAQ", display_code="600000", currency="USD"
+        ),
     ],
 )
 def test_市场身份拒绝交易所币种或代码不匹配(security_id: InstrumentIdentity) -> None:
