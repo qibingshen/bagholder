@@ -15,6 +15,7 @@ from stock_agent.adapters.market_data.registry import (
     MarketDataRegistry,
     UnknownSourceError,
 )
+from stock_agent.contracts.common import Freshness
 
 
 class 演示行情适配器:
@@ -79,6 +80,7 @@ def test_规范化行情拒绝缺少关键时间或数据版本(field: str, valu
         "market_time": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         "collected_at": datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
         "data_version": "演示版本-1",
+        "freshness": Freshness(state="REALTIME", age_seconds=1),
     }
     quote[field] = value
 
@@ -97,8 +99,51 @@ def test_规范化行情拒绝不带时区的时间(field: str) -> None:
         "market_time": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         "collected_at": datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
         "data_version": "演示版本-1",
+        "freshness": Freshness(state="REALTIME", age_seconds=1),
     }
     quote[field] = datetime(2026, 7, 14, 9, 30)
 
     with pytest.raises(ValidationError):
         NormalizedQuote(**quote)
+
+
+def test_规范化行情拒绝缺少单条行情新鲜度() -> None:
+    """每条行情必须带有新鲜度，供核心服务在使用前执行时效性控制。"""
+
+    with pytest.raises(ValidationError, match="freshness"):
+        NormalizedQuote(
+            security_id="CN:600000",
+            price=10.25,
+            source_id="演示来源",
+            market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            data_version="演示版本-1",
+        )
+
+
+def test_规范化行情接受严格的新鲜度状态() -> None:
+    """行情新鲜度使用现有公共契约，避免各来源自定义不兼容状态。"""
+
+    quote = NormalizedQuote(
+        security_id="CN:600000",
+        price=10.25,
+        source_id="演示来源",
+        market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+        data_version="演示版本-1",
+        freshness=Freshness(state="REALTIME", age_seconds=1),
+    )
+
+    assert quote.freshness.state == "REALTIME"
+
+
+def test_来源能力拒绝空市场范围() -> None:
+    """来源必须明确声明至少一个覆盖市场，避免注册不可用的适配器。"""
+
+    with pytest.raises(ValidationError, match="markets"):
+        SourceCapability(
+            source_id="演示来源",
+            markets=(),
+            credential_required=False,
+            supports_realtime=True,
+        )

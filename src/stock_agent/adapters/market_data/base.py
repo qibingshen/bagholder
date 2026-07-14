@@ -8,12 +8,14 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field, field_validator
 
+from stock_agent.contracts.common import Freshness
+
 
 class SourceCapability(BaseModel):
     """描述行情来源可提供的市场范围和运行能力。"""
 
     source_id: str = Field(min_length=1)
-    markets: tuple[str, ...]
+    markets: tuple[str, ...] = Field(min_length=1)
     credential_required: bool
     supports_realtime: bool
 
@@ -27,6 +29,7 @@ class NormalizedQuote(BaseModel):
     market_time: datetime
     collected_at: datetime
     data_version: str = Field(min_length=1)
+    freshness: Freshness
 
     @field_validator("market_time", "collected_at")
     @classmethod
