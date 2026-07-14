@@ -6,9 +6,10 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Protocol
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from stock_agent.contracts.common import Freshness
+from stock_agent.domain.market import InstrumentIdentity, Market
 
 
 class SourceCapability(BaseModel):
@@ -23,7 +24,7 @@ class SourceCapability(BaseModel):
 class NormalizedQuote(BaseModel):
     """承载已规范化且可追溯的单个证券行情。"""
 
-    security_id: str = Field(min_length=1)
+    security_id: InstrumentIdentity
     price: float
     source_id: str = Field(min_length=1)
     market_time: datetime
@@ -39,6 +40,22 @@ class NormalizedQuote(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("行情时间必须包含时区")
         return value
+
+    @model_validator(mode="after")
+    def 验证实时行情年龄(self) -> NormalizedQuote:
+        """按证券所属市场限制实时行情的最大年龄。"""
+
+        if self.freshness.state != "REALTIME":
+            return self
+
+        maximum_age_seconds = {
+            Market.CN: 5,
+            Market.HK: 15,
+            Market.US: 15,
+        }[self.security_id.market]
+        if self.freshness.age_seconds > maximum_age_seconds:
+            raise ValueError(f"实时行情年龄不能超过 {maximum_age_seconds} 秒")
+        return self
 
 
 class MarketDataAdapter(Protocol):

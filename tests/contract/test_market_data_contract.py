@@ -16,6 +16,23 @@ from stock_agent.adapters.market_data.registry import (
     UnknownSourceError,
 )
 from stock_agent.contracts.common import Freshness
+from stock_agent.domain.market import InstrumentIdentity, Market
+
+
+def 市场证券身份(market: Market) -> InstrumentIdentity:
+    """构造仅用于契约测试的完整证券身份。"""
+
+    exchange, currency = {
+        Market.CN: ("SSE", "CNY"),
+        Market.HK: ("HKEX", "HKD"),
+        Market.US: ("NASDAQ", "USD"),
+    }[market]
+    return InstrumentIdentity(
+        market=market,
+        exchange=exchange,
+        display_code="600000",
+        currency=currency,
+    )
 
 
 class 演示行情适配器:
@@ -74,7 +91,7 @@ def test_规范化行情拒绝缺少关键时间或数据版本(field: str, valu
     """缺少市场时间、采集时间或版本的供应商数据不能构造成统一行情。"""
 
     quote = {
-        "security_id": "CN:600000",
+        "security_id": 市场证券身份(Market.CN),
         "price": 10.25,
         "source_id": "演示来源",
         "market_time": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
@@ -93,7 +110,7 @@ def test_规范化行情拒绝不带时区的时间(field: str) -> None:
     """行情时间必须含时区，避免跨市场比较时把本地时间误认为同一时点。"""
 
     quote = {
-        "security_id": "CN:600000",
+        "security_id": 市场证券身份(Market.CN),
         "price": 10.25,
         "source_id": "演示来源",
         "market_time": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
@@ -112,7 +129,7 @@ def test_规范化行情拒绝缺少单条行情新鲜度() -> None:
 
     with pytest.raises(ValidationError, match="freshness"):
         NormalizedQuote(
-            security_id="CN:600000",
+            security_id=市场证券身份(Market.CN),
             price=10.25,
             source_id="演示来源",
             market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
@@ -125,7 +142,7 @@ def test_规范化行情接受严格的新鲜度状态() -> None:
     """行情新鲜度使用现有公共契约，避免各来源自定义不兼容状态。"""
 
     quote = NormalizedQuote(
-        security_id="CN:600000",
+        security_id=市场证券身份(Market.CN),
         price=10.25,
         source_id="演示来源",
         market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
@@ -147,3 +164,42 @@ def test_来源能力拒绝空市场范围() -> None:
             credential_required=False,
             supports_realtime=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("market", "age_seconds"),
+    [(Market.CN, 6), (Market.US, 16)],
+)
+def test_规范化行情拒绝超过市场实时年龄上限(market: Market, age_seconds: int) -> None:
+    """实时行情超过所属市场上限时，不能进入统一行情契约。"""
+
+    with pytest.raises(ValidationError, match="实时行情"):
+        NormalizedQuote(
+            security_id=市场证券身份(market),
+            price=10.25,
+            source_id="演示来源",
+            market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            data_version="演示版本-1",
+            freshness=Freshness(state="REALTIME", age_seconds=age_seconds),
+        )
+
+
+@pytest.mark.parametrize(
+    ("market", "age_seconds"),
+    [(Market.CN, 5), (Market.US, 15)],
+)
+def test_规范化行情接受市场实时年龄上限内的行情(market: Market, age_seconds: int) -> None:
+    """实时行情等于所属市场上限时仍是合法可用的行情。"""
+
+    quote = NormalizedQuote(
+        security_id=市场证券身份(market),
+        price=10.25,
+        source_id="演示来源",
+        market_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        collected_at=datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+        data_version="演示版本-1",
+        freshness=Freshness(state="REALTIME", age_seconds=age_seconds),
+    )
+
+    assert quote.freshness.age_seconds == age_seconds
