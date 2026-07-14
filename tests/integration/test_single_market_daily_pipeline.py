@@ -30,11 +30,15 @@ def 固定历史日线响应() -> bytes:
                 }
             ],
             "collected_at": "2026-07-14T07:01:02+00:00",
-            "data_version": "sina-固定历史响应-1",
+            "source_data_version": "sina-固定历史响应-1",
+            "adjustment_basis": "none",
+            "currency": "CNY",
+            "exchange": "SSE",
             "market": "CN",
             "market_time": "2026-07-13T15:00:00+08:00",
             "response_schema_version": "固定历史日线响应-1",
             "source_id": "sina",
+            "security_code": "600000",
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -100,7 +104,7 @@ def test_历史日线将注入响应追加保存为原始与规范化工件并�
     assert 原始批次["market"] == "CN"
     assert 原始批次["market_time"] == "2026-07-13T15:00:00+08:00"
     assert 原始批次["collected_at"] == "2026-07-14T07:01:02+00:00"
-    assert 原始批次["data_version"] == "sina-固定历史响应-1"
+    assert 原始批次["source_data_version"] == "sina-固定历史响应-1"
     assert 原始元数据["content_hash"] == hashlib.sha256(原始工件).hexdigest()
     assert 原始元数据["parent_version_id"] is None
 
@@ -111,8 +115,11 @@ def test_历史日线将注入响应追加保存为原始与规范化工件并�
     assert 规范化批次["market"] == "CN"
     assert 规范化批次["collected_at"] == "2026-07-14T07:01:02+00:00"
     assert 规范化批次["bars"][0]["market_time"] == "2026-07-13T15:00:00+08:00"
-    assert 规范化批次["bars"][0]["data_version"] == 结果.normalized_version_id
-    assert 规范化批次["data_version"] == 结果.normalized_version_id
+    assert 规范化批次["bars"][0]["source_data_version"] == "sina-固定历史响应-1"
+    assert 规范化批次["bars"][0]["adjustment_basis"] == "none"
+    assert 规范化批次["bars"][0]["artifact_version_id"] == 结果.normalized_version_id
+    assert 规范化批次["source_data_version"] == "sina-固定历史响应-1"
+    assert 规范化批次["artifact_version_id"] == 结果.normalized_version_id
     assert 元数据["parent_version_id"] == 结果.raw_version_id
     assert 元数据["content_hash"] == hashlib.sha256(规范化工件).hexdigest()
 
@@ -131,13 +138,9 @@ def test_相同历史响应重采集会追加可追溯新记录而非静默覆�
     assert 首次.raw_version_id != 第二次.raw_version_id
     assert 首次.normalized_version_id != 第二次.normalized_version_id
     assert 服务.read_bytes("market-data-raw", 首次.raw_version_id) == 固定历史日线响应()
+    assert 服务.read_bytes("market-data-raw", 第二次.raw_version_id) == 固定历史日线响应()
     assert (
-        服务.read_bytes("market-data-raw", 第二次.raw_version_id) == 固定历史日线响应()
-    )
-    assert (
-        服务.metadata_for("market-data-normalized", 首次.normalized_version_id)[
-            "parent_version_id"
-        ]
+        服务.metadata_for("market-data-normalized", 首次.normalized_version_id)["parent_version_id"]
         == 首次.raw_version_id
     )
     assert (
@@ -180,14 +183,14 @@ def test_任一工件保存失败时历史日线原子回滚且报告失败原�
     from stock_agent.workers.market_ingestion import HistoricalDailyIngestionError
 
     服务 = VersioningService(local_data_root)
-    原提交 = 服务.commit_bytes
+    原提交 = 服务.commit_batch
 
-    def 失败提交(*, dataset: str, **参数: object):
-        if dataset == 失败数据集:
+    def 失败提交(*, items: list[dict[str, object]], **参数: object):
+        if any(item["dataset"] == 失败数据集 for item in items):
             raise OSError(f"{失败数据集} 保存失败")
-        return 原提交(dataset=dataset, **参数)
+        return 原提交(items=items, **参数)
 
-    monkeypatch.setattr(服务, "commit_bytes", 失败提交)
+    monkeypatch.setattr(服务, "commit_batch", 失败提交)
     工作者 = 创建工作者(lambda **_参数: 固定历史日线响应(), 服务)
 
     with pytest.raises(HistoricalDailyIngestionError, match="保存失败"):
@@ -237,9 +240,7 @@ def test_工件字节写入后元数据登记或完成标记失败时两侧零�
 
     工作者 = 创建工作者(lambda **_参数: 固定历史日线响应(), 服务)
 
-    with pytest.raises(
-        HistoricalDailyIngestionError, match="元数据登记失败|完成标记失败"
-    ):
+    with pytest.raises(HistoricalDailyIngestionError, match="元数据登记失败|完成标记失败"):
         工作者.collect_and_save(**采集参数())
 
     断言不存在半批工件或元数据(服务, local_data_root)
@@ -249,10 +250,7 @@ def test_历史日线不得作为当前预测的实时输入(local_data_root: Pa
     """闭环产物只能用于历史研究；即使日线完整也必须被当前预测入口拒绝。"""
 
     服务 = VersioningService(local_data_root)
-    结果 = 创建工作者(lambda **_参数: 固定历史日线响应(), 服务).collect_and_save(
-        **采集参数()
-    )
-
+    结果 = 创建工作者(lambda **_参数: 固定历史日线响应(), 服务).collect_and_save(**采集参数())
     assert (
         is_usable_for_current_prediction(
             {
@@ -264,3 +262,59 @@ def test_历史日线不得作为当前预测的实时输入(local_data_root: Pa
         )
         is False
     )
+
+
+@pytest.mark.parametrize(
+    ("字段", "错误值"),
+    [
+        ("security_code", "000001"),
+        ("exchange", "SZSE"),
+        ("currency", "USD"),
+        ("market", "US"),
+    ],
+)
+def test_payload_证券身份任一字段与调用身份不一致时整批拒绝且零残留(
+    字段: str, 错误值: str, local_data_root: Path
+) -> None:
+    """供应商载荷必须显式复核证券代码、交易所、币种和市场。"""
+
+    from stock_agent.workers.market_ingestion import HistoricalDailyIngestionError
+
+    payload = json.loads(固定历史日线响应())
+    payload[字段] = 错误值
+    服务 = VersioningService(local_data_root)
+    工作者 = 创建工作者(
+        lambda **_参数: json.dumps(payload, ensure_ascii=False).encode("utf-8"), 服务
+    )
+
+    with pytest.raises(HistoricalDailyIngestionError, match="证券|市场|交易所|币种"):
+        工作者.collect_and_save(**采集参数())
+
+    断言不存在半批工件或元数据(服务, local_data_root)
+
+
+def test_批次完成标记失败时两侧均不可查询且下次启动会恢复(
+    local_data_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """唯一批次完成标记失败不能把任一侧暴露为独立版本。"""
+
+    from stock_agent.workers.market_ingestion import HistoricalDailyIngestionError
+
+    服务 = VersioningService(local_data_root)
+    原触碰 = Path.touch
+
+    def 拒绝批次完成标记(path: Path, *参数: object, **关键字参数: object) -> None:
+        if path.name == "_COMPLETE" and ".batches" in path.parts:
+            raise OSError("批次完成标记失败")
+        原触碰(path, *参数, **关键字参数)
+
+    monkeypatch.setattr(Path, "touch", 拒绝批次完成标记)
+    with pytest.raises(HistoricalDailyIngestionError, match="批次完成标记失败"):
+        创建工作者(lambda **_参数: 固定历史日线响应(), 服务).collect_and_save(**采集参数())
+
+    assert list((local_data_root / "artifacts").rglob("_COMPLETE")) == []
+    assert 服务._metadata._connection.execute(
+        "SELECT COUNT(*) FROM dataset_versions"
+    ).fetchone() == (0,)
+    恢复后服务 = VersioningService(local_data_root)
+    断言不存在半批工件或元数据(恢复后服务, local_data_root)

@@ -127,7 +127,7 @@ def test_新浪适配器响应缺少任一请求代码时拒绝全部行情(loca
         "adjustment_basis",
         "source_id",
         "collected_at",
-        "data_version",
+        "source_data_version",
     ],
 )
 def test_标准化历史日线缺少任一契约字段时整批拒绝且不产生持久化记录(
@@ -153,14 +153,14 @@ def test_标准化历史日线缺少任一契约字段时整批拒绝且不产�
         "adjustment_basis": "none",
         "source_id": "test-source",
         "collected_at": datetime(2026, 7, 14, 15, 1, tzinfo=UTC),
-        "data_version": "daily-v1",
+        "source_data_version": "daily-v1",
     }
     不完整日线 = 完整日线.copy()
     del 不完整日线[缺失字段]
 
-    批次 = HistoricalDailyBarBatch(VersioningService(local_data_root))
+    批次 = HistoricalDailyBarBatch()
     with pytest.raises(HistoricalDailyBarValidationError, match="缺失|完整"):
-        批次.normalize_and_save([完整日线, 不完整日线])
+        批次.normalize([完整日线, 不完整日线])
 
     assert not (local_data_root / "artifacts" / "market-data-raw").exists()
     assert not (local_data_root / "artifacts" / "market-data-normalized").exists()
@@ -249,9 +249,7 @@ def test_公司行动拒绝不合法复权比例(复权比例: float) -> None:
         ("split-20260714", datetime(2026, 7, 14, 9, 0)),
     ],
 )
-def test_公司行动拒绝缺失标识或无时区日期(
-    action_id: str, effective_at: datetime
-) -> None:
+def test_公司行动拒绝缺失标识或无时区日期(action_id: str, effective_at: datetime) -> None:
     """公司行动的标识和生效时点均是可追溯复权的最小前提。"""
 
     with pytest.raises(ValueError, match="标识|时区"):

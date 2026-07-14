@@ -6,7 +6,6 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 
@@ -77,20 +76,21 @@ class HistoricalDailyIngestionWorker:
             normalized_content, bars = self._normalize_payload(
                 payload, collected_at, security_id, source_id, normalized_version_id
             )
-            self._versioning_service.commit_bytes(
-                dataset="market-data-raw",
-                version_id=raw_version_id,
-                content=raw_response,
-                source_id=source_id,
-                expected_hash=sha256(raw_response).hexdigest(),
-            )
-            self._versioning_service.commit_bytes(
-                dataset="market-data-normalized",
-                version_id=normalized_version_id,
-                content=normalized_content,
-                source_id=source_id,
-                parent_version_id=raw_version_id,
-                expected_hash=sha256(normalized_content).hexdigest(),
+            self._versioning_service.commit_batch(
+                batch_id=f"historical-daily-{uuid4().hex}",
+                items=[
+                    {
+                        "dataset": "market-data-raw",
+                        "version_id": raw_version_id,
+                        "content": raw_response,
+                    },
+                    {
+                        "dataset": "market-data-normalized",
+                        "version_id": normalized_version_id,
+                        "content": normalized_content,
+                        "parent_version_id": raw_version_id,
+                    },
+                ],
             )
         except HistoricalDailyIngestionError:
             self._rollback(raw_version_id, normalized_version_id)
@@ -126,15 +126,24 @@ class HistoricalDailyIngestionWorker:
             raise HistoricalDailyIngestionError("历史日线原始响应无法解析") from error
         if not isinstance(payload, dict) or not isinstance(payload.get("bars"), list):
             raise HistoricalDailyIngestionError("历史日线响应缺少完整 bars 字段")
-        if (
-            payload.get("source_id") != source_id
-            or payload.get("market") != security_id.market.value
-        ):
-            raise HistoricalDailyIngestionError("历史日线来源或市场不一致")
+        expected_identity = {
+            "security_code": security_id.display_code,
+            "exchange": security_id.exchange,
+            "currency": security_id.currency,
+            "market": security_id.market.value,
+        }
+        if payload.get("source_id") != source_id:
+            raise HistoricalDailyIngestionError("历史日线来源不一致")
+        for field, expected_value in expected_identity.items():
+            if payload.get(field) != expected_value:
+                raise HistoricalDailyIngestionError(f"历史日线{field}与证券身份不一致")
         if payload.get("collected_at") != collected_at.isoformat():
             raise HistoricalDailyIngestionError("历史日线采集时间不一致")
-        if not isinstance(payload.get("data_version"), str) or not payload["data_version"]:
-            raise HistoricalDailyIngestionError("历史日线数据版本缺失")
+        if (
+            not isinstance(payload.get("source_data_version"), str)
+            or not payload["source_data_version"]
+        ):
+            raise HistoricalDailyIngestionError("历史日线上游数据版本缺失")
         return payload
 
     def _normalize_payload(
@@ -157,17 +166,15 @@ class HistoricalDailyIngestionWorker:
                     "low": bar["low"],
                     "close": bar["close"],
                     "volume": bar["volume"],
-                    "currency": security_id.currency,
-                    "adjustment_basis": "none",
+                    "currency": payload["currency"],
+                    "adjustment_basis": payload["adjustment_basis"],
                     "source_id": source_id,
                     "collected_at": collected_at,
-                    "data_version": normalized_version_id,
+                    "source_data_version": payload["source_data_version"],
                 }
                 for bar in payload["bars"]
             ]
-            normalized = HistoricalDailyBarBatch(self._versioning_service).normalize_and_save(
-                records
-            )
+            normalized = HistoricalDailyBarBatch().normalize(records)
         except (KeyError, TypeError, ValueError, HistoricalDailyBarValidationError) as error:
             raise HistoricalDailyIngestionError(f"历史日线字段或价格无效：{error}") from error
         bars = [
@@ -184,7 +191,7 @@ class HistoricalDailyIngestionWorker:
                 adjustment_basis=bar.adjustment_basis,
                 source_id=bar.source_id,
                 collected_at=bar.collected_at,
-                data_version=bar.data_version,
+                source_data_version=bar.source_data_version,
             )
             for bar in normalized
         ]
@@ -193,7 +200,8 @@ class HistoricalDailyIngestionWorker:
             "market": security_id.market.value,
             "market_time": payload["market_time"],
             "collected_at": collected_at.isoformat(),
-            "data_version": normalized_version_id,
+            "source_data_version": payload["source_data_version"],
+            "artifact_version_id": normalized_version_id,
             "bars": [
                 {
                     "trade_date": bar.trade_date.isoformat(),
@@ -207,7 +215,8 @@ class HistoricalDailyIngestionWorker:
                     "adjustment_basis": bar.adjustment_basis,
                     "source_id": bar.source_id,
                     "collected_at": bar.collected_at.isoformat(),
-                    "data_version": bar.data_version,
+                    "source_data_version": bar.source_data_version,
+                    "artifact_version_id": normalized_version_id,
                     "freshness": bar.freshness.state,
                 }
                 for bar in bars

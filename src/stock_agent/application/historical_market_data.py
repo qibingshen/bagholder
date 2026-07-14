@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 
-from stock_agent.application.versioning_service import VersioningService
 from stock_agent.domain.market import InstrumentIdentity, Market
 
 
@@ -31,7 +30,7 @@ class HistoricalDailyBar:
     adjustment_basis: str
     source_id: str
     collected_at: datetime
-    data_version: str
+    source_data_version: str
 
 
 class HistoricalDailyBarBatch:
@@ -50,14 +49,11 @@ class HistoricalDailyBarBatch:
         "adjustment_basis",
         "source_id",
         "collected_at",
-        "data_version",
+        "source_data_version",
     }
 
-    def __init__(self, versioning_service: VersioningService) -> None:
-        self._versioning_service = versioning_service
-
-    def normalize_and_save(self, records: list[dict[str, Any]]) -> list[HistoricalDailyBar]:
-        """验证完整批次并返回标准化结果；任一记录无效即拒绝整批。"""
+    def normalize(self, records: list[dict[str, Any]]) -> list[HistoricalDailyBar]:
+        """验证完整批次并返回标准化结果，不执行持久化。"""
         if not records:
             raise HistoricalDailyBarValidationError("历史日线批次不能为空")
         return [self._normalize(record) for record in records]
@@ -98,8 +94,11 @@ class HistoricalDailyBarBatch:
             or not record["adjustment_basis"].strip()
         ):
             raise HistoricalDailyBarValidationError("复权口径无效")
-        if not isinstance(record["data_version"], str) or not record["data_version"].strip():
-            raise HistoricalDailyBarValidationError("数据版本无效")
+        if (
+            not isinstance(record["source_data_version"], str)
+            or not record["source_data_version"].strip()
+        ):
+            raise HistoricalDailyBarValidationError("上游数据版本无效")
 
         return HistoricalDailyBar(
             security_id=security_id,
@@ -114,7 +113,7 @@ class HistoricalDailyBarBatch:
             adjustment_basis=record["adjustment_basis"],
             source_id=record["source_id"],
             collected_at=collected_at,
-            data_version=record["data_version"],
+            source_data_version=record["source_data_version"],
         )
 
     @staticmethod
