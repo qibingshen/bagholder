@@ -8,8 +8,12 @@ class FakeKeyring:
 
     def __init__(self) -> None:
         self.items: dict[tuple[str, str], str] = {}
+        self.fail_next_write = False
 
     def set_password(self, service_name: str, username: str, password: str) -> None:
+        if self.fail_next_write:
+            self.fail_next_write = False
+            raise RuntimeError("系统钥匙串写入失败")
         self.items[(service_name, username)] = password
 
     def delete_password(self, service_name: str, username: str) -> None:
@@ -80,6 +84,34 @@ def test_finnhub仅通过系统钥匙串配置并在撤销后恢复受限() -> N
     assert revoked.is_authorized is False
     assert fake_keyring.items == {}
     assert service.selection_record("finnhub").access_state == "受限"
+
+
+def test_finnhub重配写入失败后公开状态恢复受限且不泄露引用() -> None:
+    """重配失败不能保留已删除凭据的陈旧引用或继续显示已授权。"""
+
+    from stock_agent.adapters.platform.credential_store import KeyringCredentialStore
+    from stock_agent.application.data_source_credential_service import (
+        CredentialRegistration,
+        DataSourceCredentialService,
+    )
+
+    fake_keyring = FakeKeyring()
+    service = DataSourceCredentialService(KeyringCredentialStore(keyring_backend=fake_keyring))
+    service.configure(CredentialRegistration("finnhub", "first-secret"))
+
+    fake_keyring.fail_next_write = True
+    with pytest.raises(RuntimeError, match="系统钥匙串写入失败"):
+        service.configure(CredentialRegistration("finnhub", "second-secret"))
+
+    authorization = service.status("finnhub")
+    selection = service.selection_record("finnhub")
+    assert authorization.is_authorized is False
+    assert selection.access_state == "受限"
+    assert fake_keyring.items == {}
+    assert "first-secret" not in str(authorization)
+    assert "second-secret" not in str(selection)
+    assert "platform-keychain://" not in str(authorization)
+    assert "platform-keychain://" not in str(selection)
 
 
 def test_凭据操作拒绝非finnhub和非钥匙串存储() -> None:

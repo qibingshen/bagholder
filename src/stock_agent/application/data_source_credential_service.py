@@ -93,7 +93,7 @@ class DataSourceCredentialService:
         if not isinstance(self._credential_store, KeyringCredentialStore):
             raise ValueError("Finnhub 凭据必须使用系统钥匙串存储")
 
-        previous_reference = self._credential_references.get(registration.source_id)
+        previous_reference = self._credential_references.pop(registration.source_id, None)
         if previous_reference is not None:
             self._credential_store.delete(previous_reference)
         self._credential_references[registration.source_id] = self._credential_store.put(

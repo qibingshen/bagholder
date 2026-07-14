@@ -67,3 +67,26 @@ git diff --check
 ```
 
 复验结果：7 项测试全部通过；Ruff 格式检查通过（55 个文件已格式化）；Ruff 静态检查通过；差异检查通过。
+
+## 修复与复验（二）
+
+重配 Finnhub 时，服务现在先从私有引用映射移除旧引用，再删除旧钥匙串项并写入新密钥。新密钥写入失败时不会遗留陈旧引用，因此公开 `status()` 返回未授权，选择记录返回“受限”；公开对象和选择记录仍不包含密钥或钥匙串引用。
+
+先添加失败场景测试并执行：
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/contract/test_data_source_credentials.py -v
+```
+
+红灯结果：新增“Finnhub 重配写入失败后公开状态恢复受限且不泄露引用”测试失败，实际 `is_authorized` 为 `True`，证明旧私有引用仍导致伪授权。
+
+最小修复并格式化后执行：
+
+```powershell
+py -3.12 -m pytest -o addopts='' tests/contract/test_data_source_credentials.py tests/failure/test_credential_exposure.py -v
+py -3.12 -m ruff format --check src tests
+py -3.12 -m ruff check src tests
+git diff --check
+```
+
+复验结果：8 项测试全部通过；Ruff 格式检查通过（55 个文件已格式化）；Ruff 静态检查通过；差异检查通过。
