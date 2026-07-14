@@ -13,7 +13,7 @@ from stock_agent.adapters.market_data.sina_codes import (
 from stock_agent.application.versioning_service import ImmutableVersionError, VersioningService
 from stock_agent.domain.freshness import (
     FreshnessClassificationError,
-    is_usable_for_current_prediction,
+    require_usable_for_current_prediction,
 )
 from stock_agent.domain.market import (
     InstrumentIdentity,
@@ -197,7 +197,7 @@ def test_当前预测拒绝过期或休市行情并给出不可用原因(状态:
     """当前预测入口必须把不可用原因显式反馈给调用方，不能只返回裸布尔值。"""
 
     with pytest.raises(FreshnessClassificationError, match="过期|不可用"):
-        is_usable_for_current_prediction(
+        require_usable_for_current_prediction(
             {
                 "state": 状态,
                 "market_time": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
@@ -211,7 +211,7 @@ def test_当前预测拒绝市场时间不可验证行情并给出不可用原�
     """即使状态标为实时，市场时间不可验证也必须明确拒绝当前预测。"""
 
     with pytest.raises(FreshnessClassificationError, match="不可验证|不可用"):
-        is_usable_for_current_prediction(
+        require_usable_for_current_prediction(
             {
                 "state": "REALTIME",
                 "market_time": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),

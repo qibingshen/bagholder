@@ -42,6 +42,27 @@ def is_usable_for_current_prediction(fact: CurrentPredictionFreshnessFact) -> bo
     return True
 
 
+def require_usable_for_current_prediction(fact: CurrentPredictionFreshnessFact) -> None:
+    """强制校验行情能否用于当前预测，并给出不可用的领域原因。"""
+
+    if fact.get("time_is_verifiable") is not True:
+        raise FreshnessClassificationError("市场时间不可验证，当前预测不可用")
+
+    market_time = fact.get("market_time")
+    collected_at = fact.get("collected_at")
+    if not isinstance(market_time, datetime) or not isinstance(collected_at, datetime):
+        raise FreshnessClassificationError("当前预测新鲜度事实必须包含有效的市场时间和采集时间")
+    calculate_age_seconds(market_time, collected_at)
+
+    state = fact.get("state")
+    if state in {"DELAYED", "STALE"}:
+        raise FreshnessClassificationError("市场行情过期，当前预测不可用")
+    if state == "CLOSED":
+        raise FreshnessClassificationError("市场休市，当前预测不可用")
+    if state not in {"REALTIME", "NEAR_REALTIME"}:
+        raise FreshnessClassificationError("市场行情状态不可用，当前预测不可用")
+
+
 def classify_freshness(
     market: Market,
     market_time: datetime,
