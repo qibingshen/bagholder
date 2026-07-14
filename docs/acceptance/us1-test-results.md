@@ -8,22 +8,22 @@
 
 ## US1 覆盖的测试文件
 
-| 类别 | 文件 | 本次定向执行结果 |
+| 类别 | 文件 | 已记录的定向执行结果 |
 | --- | --- | --- |
-| 契约 | `tests/contract/test_market_data_contract.py` | 已执行，包含在 251 个通过的测试中 |
-| 属性 | `tests/property/test_freshness_rules.py` | 已执行，包含在 251 个通过的测试中 |
-| 失败场景 | `tests/failure/test_market_data_failures.py` | 已执行，包含在 251 个通过的测试中 |
-| 集成 | `tests/integration/test_single_market_daily_pipeline.py` | 已执行，包含在 251 个通过的测试中 |
+| 契约 | `tests/contract/test_market_data_contract.py` | 包含在 251 个通过的测试断言中 |
+| 属性 | `tests/property/test_freshness_rules.py` | 包含在 251 个通过的测试断言中 |
+| 失败场景 | `tests/failure/test_market_data_failures.py` | 包含在 251 个通过的测试断言中 |
+| 集成 | `tests/integration/test_single_market_daily_pipeline.py` | 包含在 251 个通过的测试断言中 |
 
-定向命令：
+此前的定向执行命令为：
 
 ```powershell
 py -3.12 -m pytest tests/contract/test_market_data_contract.py tests/property/test_freshness_rules.py tests/failure/test_market_data_failures.py tests/integration/test_single_market_daily_pipeline.py
 ```
 
-测试断言结果为 `251 passed in 13.76s`。但该命令的退出码为 1：项目全局覆盖率门槛为 80%，而只运行上述四个 US1 文件时的总覆盖率为 `76.03%`，因此 pytest 将本次定向执行标记为失败。不得将其记为全绿。
+该次执行是当时的快照：251 个测试断言通过，但因只运行 US1 子集而使总覆盖率为 `76.03%`，低于全局 `fail-under = 80`，命令退出码为 1。该历史定向结果不应被表述为全绿，也不替代下列全量复验。
 
-## 全量测试与覆盖率
+## 当前全量复验
 
 执行命令：
 
@@ -31,22 +31,20 @@ py -3.12 -m pytest tests/contract/test_market_data_contract.py tests/property/te
 py -3.12 -m pytest
 ```
 
-结果：退出码 0，`363 passed in 22.90s`；总覆盖率 `88.31%`，满足项目要求的 80.0% 覆盖率门槛。
+结果：退出码 0，`363 passed`；总覆盖率 `88.31%`，满足项目要求的 80.0% 覆盖率门槛。
 
-## 质量检查
+## 当前质量检查
 
 | 命令 | 结果 | 详情 |
 | --- | --- | --- |
-| `py -3.12 -m ruff format --check src tests` | 未通过（退出码 1） | 67 个文件已格式化；`src/stock_agent/desktop/pages/_recovery.py` 与 `tests/property/test_freshness_rules.py` 共 2 个文件需要格式化。 |
+| `py -3.12 -m ruff format --check src tests` | 通过（退出码 0） | `69 files already formatted` |
 | `py -3.12 -m ruff check src tests` | 通过（退出码 0） | `All checks passed!` |
-| `py -3.12 tools/check_chinese_project_text.py .` | 未通过（退出码 1） | `tests/failure/test_market_data_failures.py:89`：注释缺少简体中文的说明。 |
+| `py -3.12 tools/check_chinese_project_text.py .` | 通过（退出码 0） | 检查说明通过 |
 
-## 非通过项及影响
+## 记录刷新说明
 
-1. US1 定向 pytest 的 251 个测试断言均通过，但因为只运行该子集导致总覆盖率为 76.03%，未达到全局 `fail-under = 80`，命令退出码为 1。
-2. Ruff 格式检查有 2 个待格式化文件，未在本任务中修改；本任务禁止修改生产代码和测试。
-3. 全仓中文文本检查有 1 个既有非通过项：`tests/failure/test_market_data_failures.py:89` 的注释未含简体中文说明。该项是文本规范问题，不影响全量业务测试 `363 passed`、US1 四个测试文件的 251 个断言通过，亦不影响 Ruff 静态规则检查通过；但它仍使全仓中文文本检查未通过。
+此前本记录中的 Ruff 格式检查和全仓中文文本检查未通过，均为 T046 执行时的真实快照，不是当前状态。后续质量提交 `906ef97`（`style: fix project quality gates`）已修复相应问题；本次按上列命令重新验证，格式检查、静态检查和中文检查均通过。不得将此前快照改写为当时已通过，也不得伪造未执行的命令结果。
 
 ## 验收结论
 
-US1 的目标契约、属性、失败与集成测试断言已全部通过，且全量测试与全量覆盖率门槛通过。由于定向子集覆盖率门槛、Ruff 格式检查和全仓中文文本检查存在上述非通过项，T046 的质量门禁不能表述为全部通过，须在修复并重新验证后才能获得全绿结论。
+US1 的目标契约、属性、失败与集成测试断言已通过；当前全量测试、覆盖率门槛、Ruff 格式检查、Ruff 静态检查和全仓中文文本检查均通过。历史定向子集命令的覆盖率退出码仅反映其执行时的子集覆盖率，不构成当前全量质量门禁的未通过项。
