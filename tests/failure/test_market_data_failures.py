@@ -86,7 +86,9 @@ def test_原始证券输入转换拒绝跨市场交易所和非法代码(
 def test_原始证券输入转换拒绝非正式市场标识() -> None:
     """原始接口的字符串市场标识不能绕过正式枚举和证券身份规则。"""
 
-    raw_identity = InstrumentIdentityInput("CN", "SSE", "600000", "CNY")  # type: ignore[arg-type]
+    raw_identity = InstrumentIdentityInput(  # type: ignore[arg-type] 传入字符串以验证正式市场枚举边界
+        "CN", "SSE", "600000", "CNY"
+    )
 
     with pytest.raises(MarketRuleError, match="市场"):
         raw_identity.to_identity()

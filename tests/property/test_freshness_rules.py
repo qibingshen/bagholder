@@ -172,9 +172,7 @@ def test_拒绝无时区或负年龄的时间(market_time: datetime, collected_a
     ("market", "age_seconds"),
     [(Market.CN, 0), (Market.HK, 86_400), (Market.US, 900)],
 )
-def test_交易日历关闭时有效时间无论年龄均为休市(
-    market: Market, age_seconds: int
-) -> None:
+def test_交易日历关闭时有效时间无论年龄均为休市(market: Market, age_seconds: int) -> None:
     """交易日历关闭优先于有效年龄的任何新鲜度分级。"""
 
     collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)

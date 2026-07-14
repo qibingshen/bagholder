@@ -39,7 +39,5 @@ def _is_aware(value: object) -> bool:
     """判断时间是否带有可审计的时区信息。"""
 
     return (
-        isinstance(value, datetime)
-        and value.tzinfo is not None
-        and value.utcoffset() is not None
+        isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
     )
