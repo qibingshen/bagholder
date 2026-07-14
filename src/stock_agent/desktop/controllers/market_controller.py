@@ -147,7 +147,7 @@ def _degradation_status(market_status: MarketStatus) -> str | None:
 
     if not market_status.is_verified:
         return "STALE"
-    if market_status.trading_calendar_status in {"CLOSED", "HOLIDAY"}:
+    if market_status.trading_calendar_status != "OPEN":
         return "CLOSED"
     if market_status.freshness.state not in {"REALTIME", "NEAR_REALTIME"}:
         return "STALE"

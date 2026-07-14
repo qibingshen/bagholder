@@ -25,16 +25,17 @@ def _主要指数身份() -> InstrumentIdentity:
 
 def _市场状态(
     *,
+    market: Market = Market.CN,
     calendar_status: str = "OPEN",
     freshness_state: str = "REALTIME",
     is_verified: bool = True,
 ) -> MarketStatus:
     """构造带完整来源、时点、版本的新鲜本地市场状态。"""
 
-    market_time = datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo(Market.CN.timezone))
+    market_time = datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo(market.timezone))
     return MarketStatus(
-        market=Market.CN,
-        market_timezone=Market.CN.timezone,
+        market=market,
+        market_timezone=market.timezone,
         trading_calendar_status=calendar_status,
         market_time=market_time,
         collected_at=market_time.astimezone(UTC),
@@ -152,6 +153,37 @@ def test_控制器在本地事实不足或不可用时选择降级状态(
     )
 
     assert model.page_state.status == expected_status
+    assert model.page_state.shows_realtime is False
+    assert model.current_prediction_allowed is False
+
+
+@pytest.mark.parametrize(
+    ("market", "calendar_status"),
+    [
+        (Market.CN, "MIDDAY_BREAK"),
+        (Market.HK, "TYPHOON_SUSPENDED"),
+        (Market.US, "PRE_MARKET"),
+        (Market.US, "AFTER_HOURS"),
+    ],
+)
+def test_控制器仅在交易日历为_OPEN_时允许市场准备状态(market: Market, calendar_status: str) -> None:
+    """所有受控的非开市日历状态均不得显示实时数据或允许当前预测。"""
+
+    from stock_agent.desktop.controllers.market_controller import MarketController
+
+    controller = MarketController(
+        market_service=_本地市场服务(_市场状态(market=market, calendar_status=calendar_status)),
+        historical_daily_bars=[_历史日线()],
+    )
+
+    model = controller.build_market_overview(
+        market=market,
+        primary_index_codes=["000001"],
+        start_date=date(2026, 7, 13),
+        end_date=date(2026, 7, 13),
+    )
+
+    assert model.page_state.status == "CLOSED"
     assert model.page_state.shows_realtime is False
     assert model.current_prediction_allowed is False
 
