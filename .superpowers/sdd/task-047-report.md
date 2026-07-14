@@ -54,3 +54,18 @@ ModuleNotFoundError: No module named 'stock_agent.domain.prediction'
 ```
 
 另执行 `py -3.12 -m py_compile tests/contract/test_prediction_contract.py`，语法检查通过。红灯原因仍是生产领域模块尚未实现，未为转绿添加任何实现。
+
+## 审查修正（第三轮）
+
+- `confidence`、`primary_evidence`、`risk_factors`、`freshness`、`model_version`、`disclaimer` 的必填性测试改为逐项从有效预测负载执行 `pop` 删除。
+- 每次删除后均断言 `PredictionOutput` 抛出 `ValidationError`，因此验证的是字段缺失，而非字段值为 `None` 或空值时的校验。
+
+## 第三轮红灯验证
+
+执行指定命令后仍在测试收集阶段失败：
+
+```text
+ModuleNotFoundError: No module named 'stock_agent.domain.prediction'
+```
+
+本轮未修改生产实现。

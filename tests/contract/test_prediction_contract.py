@@ -141,21 +141,13 @@ def test_预测输出拒绝非规定交易日周期() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("confidence", None),
-        ("primary_evidence", ()),
-        ("risk_factors", ()),
-        ("freshness", ""),
-        ("model_version", ""),
-        ("disclaimer", None),
-    ],
+    "field", ["confidence", "primary_evidence", "risk_factors", "freshness", "model_version", "disclaimer"]
 )
-def test_预测输出拒绝缺少规定安全字段(field: str, value: object) -> None:
+def test_预测输出拒绝缺少规定安全字段(field: str) -> None:
     """置信度、依据、风险、新鲜度、模型版本和固定提示均为不可省略字段。"""
 
     payload = 完整预测输出()
-    payload[field] = value
+    payload.pop(field)
 
     with pytest.raises(ValidationError):
         PredictionOutput(**payload)
