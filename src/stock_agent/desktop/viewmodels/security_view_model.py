@@ -6,14 +6,16 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from stock_agent.application.market_service import HistoricalDailyBar, MarketStatus
+from stock_agent.application.market_service import MarketStatus
 from stock_agent.domain.freshness import is_usable_for_current_prediction
 from stock_agent.domain.market import InstrumentIdentity
+from stock_agent.workers.market_ingestion import IngestedHistoricalDailyBar
 
 
 class _TraceableDerivedFact(BaseModel):
     """派生展示事实必须能定位到本地输入来源、时点和数据版本。"""
 
+    security_id: InstrumentIdentity
     source_id: str = Field(min_length=1)
     market_time: datetime
     collected_at: datetime
@@ -48,6 +50,7 @@ class RelativeStrengthFact(_TraceableDerivedFact):
 class SectorMembershipFact(BaseModel):
     """证券板块归属及其本地来源事实。"""
 
+    security_id: InstrumentIdentity
     sector_name: str = Field(min_length=1)
     source_id: str = Field(min_length=1)
     market_time: datetime
@@ -70,7 +73,7 @@ class SecurityResearchViewModel(BaseModel):
 
     security_id: InstrumentIdentity
     market_status: MarketStatus | None
-    daily_bars: tuple[HistoricalDailyBar, ...] = ()
+    daily_bars: tuple[IngestedHistoricalDailyBar, ...] = ()
     indicators: tuple[IndicatorFact, ...] = ()
     sector_membership: SectorMembershipFact | None = None
     relative_strength: RelativeStrengthFact | None = None
@@ -84,7 +87,7 @@ class SecurityResearchViewModel(BaseModel):
         *,
         security_id: InstrumentIdentity,
         market_status: MarketStatus | None,
-        daily_bars: list[HistoricalDailyBar] | tuple[HistoricalDailyBar, ...] = (),
+        daily_bars: list[IngestedHistoricalDailyBar] | tuple[IngestedHistoricalDailyBar, ...] = (),
         indicators: list[IndicatorFact] | tuple[IndicatorFact, ...] = (),
         sector_membership: SectorMembershipFact | None = None,
         relative_strength: RelativeStrengthFact | None = None,
@@ -95,24 +98,39 @@ class SecurityResearchViewModel(BaseModel):
         indicator_values = tuple(indicators)
         if any(bar.security_id != security_id for bar in bars):
             raise ValueError("日线证券身份必须与研究证券一致")
+        if any(bar.freshness.state != "HISTORICAL" for bar in bars):
+            raise ValueError("历史日线新鲜度只能为 HISTORICAL")
+        if any(fact.security_id != security_id for fact in indicator_values):
+            raise ValueError("指标证券身份必须与研究证券一致")
+        if sector_membership is not None and sector_membership.security_id != security_id:
+            raise ValueError("板块事实证券身份必须与研究证券一致")
+        if relative_strength is not None and relative_strength.security_id != security_id:
+            raise ValueError("相对强弱证券身份必须与研究证券一致")
 
         if market_status is None:
             prediction_allowed = False
             degradation_status = "行情状态不可验证，已降级"
         else:
-            prediction_allowed = is_usable_for_current_prediction(
-                {
-                    "state": market_status.freshness.state,
-                    "market_time": market_status.market_time,
-                    "collected_at": market_status.collected_at,
-                    "time_is_verifiable": True,
-                }
+            prediction_allowed = (
+                market_status.trading_calendar_status == "OPEN"
+                and _时点可验证(market_status)
+                and is_usable_for_current_prediction(
+                    {
+                        "state": market_status.freshness.state,
+                        "market_time": market_status.market_time,
+                        "collected_at": market_status.collected_at,
+                        "time_is_verifiable": _时点可验证(market_status),
+                    }
+                )
             )
             degradation_status = _降级状态(market_status) if not prediction_allowed else None
 
         empty_state = (
             "暂无本地日K线、板块和指标事实"
-            if not bars and sector_membership is None and not indicator_values
+            if not bars
+            and sector_membership is None
+            and not indicator_values
+            and relative_strength is None
             else None
         )
 
@@ -145,3 +163,15 @@ def _验证带时区时间(value: datetime, label: str) -> None:
 
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label}必须包含时区")
+
+
+def _时点可验证(market_status: MarketStatus) -> bool:
+    """仅在市场和采集时点均带时区且顺序可审计时允许当前预测准入。"""
+
+    return (
+        market_status.market_time.tzinfo is not None
+        and market_status.market_time.utcoffset() is not None
+        and market_status.collected_at.tzinfo is not None
+        and market_status.collected_at.utcoffset() is not None
+        and market_status.market_time <= market_status.collected_at
+    )

@@ -1,5 +1,6 @@
 """验证行情适配器协议与注册表不依赖具体供应商。"""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,10 @@ from stock_agent.desktop.viewmodels.security_view_model import (
     SecurityResearchViewModel,
 )
 from stock_agent.domain.market import InstrumentIdentity, InstrumentIdentityInput, Market
+from stock_agent.workers.market_ingestion import (
+    HistoricalFreshness,
+    IngestedHistoricalDailyBar,
+)
 
 
 def 市场证券身份(market: Market) -> InstrumentIdentity:
@@ -702,10 +707,10 @@ def test_市场身份拒绝交易所币种或代码不匹配(security_id: Instru
         MarketService().validate_security_identity(security_id)
 
 
-def _完整日线() -> HistoricalDailyBar:
+def _完整日线() -> IngestedHistoricalDailyBar:
     """构造带完整本地溯源字段的历史日线事实。"""
 
-    return HistoricalDailyBar(
+    return IngestedHistoricalDailyBar(
         security_id=市场证券身份(Market.CN),
         trade_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
         open=10.0,
@@ -715,11 +720,11 @@ def _完整日线() -> HistoricalDailyBar:
         volume=1_000_000,
         adjustment_basis="NONE",
         currency="CNY",
-        source_id="本地日线归档",
+        source_id="sina",
         market_time=datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
         collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
-        data_version="日线版本-7",
-        freshness=Freshness(state="CLOSED", age_seconds=0),
+        source_data_version="日线版本-7",
+        artifact_version_id="normalized-7",
     )
 
 
@@ -735,9 +740,9 @@ def test_证券研究视图保留日线成交量及所有溯源信息() -> None:
 
     assert model.daily_bars == (bar,)
     assert model.daily_bars[0].volume == 1_000_000
-    assert model.daily_bars[0].source_id == "本地日线归档"
-    assert model.daily_bars[0].data_version == "日线版本-7"
-    assert model.daily_bars[0].freshness.state != "REALTIME"
+    assert model.daily_bars[0].source_id == "sina"
+    assert model.daily_bars[0].source_data_version == "日线版本-7"
+    assert model.daily_bars[0].freshness.state == "HISTORICAL"
     assert model.empty_state_zh is None
 
 
@@ -837,3 +842,141 @@ def test_证券研究视图在已验证近实时行情时允许当前预测() ->
 
     assert model.current_prediction_allowed is True
     assert model.degradation_status_zh is None
+
+
+def _完整已采集历史日线() -> IngestedHistoricalDailyBar:
+    """构造真实采集链路使用的历史日线，包含来源版本和工件版本。"""
+
+    return IngestedHistoricalDailyBar(
+        security_id=市场证券身份(Market.CN),
+        trade_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
+        market_time=datetime(2026, 7, 13, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+        open=10.0,
+        high=10.5,
+        low=9.8,
+        close=10.2,
+        volume=1_000_000,
+        currency="CNY",
+        adjustment_basis="NONE",
+        source_id="sina",
+        collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        source_data_version="sina-历史响应-7",
+        artifact_version_id="normalized-7",
+    )
+
+
+def test_证券研究视图直接保留真实采集历史日线的来源版本和工件版本() -> None:
+    """视图模型必须消费真实采集日线，不得改用不兼容的平行日线类型。"""
+
+    bar = _完整已采集历史日线()
+
+    model = SecurityResearchViewModel.assemble(
+        security_id=bar.security_id,
+        market_status=MarketService().get_market_status(Market.CN),
+        daily_bars=[bar],
+    )
+
+    assert model.daily_bars == (bar,)
+    assert model.daily_bars[0].source_data_version == "sina-历史响应-7"
+    assert hasattr(model.daily_bars[0], "artifact_version_id")
+    assert model.daily_bars[0].artifact_version_id == "normalized-7"
+    assert model.daily_bars[0].source_id == "sina"
+    assert model.daily_bars[0].freshness.state == "HISTORICAL"
+
+
+@pytest.mark.parametrize("state", ["REALTIME", "NEAR_REALTIME", "DELAYED", "STALE", "CLOSED"])
+def test_证券研究视图拒绝被标记为非历史新鲜度的采集日线(state: str) -> None:
+    """历史日线只能使用 HISTORICAL 新鲜度，不能伪装为实时或其他状态。"""
+
+    with pytest.raises(ValueError):
+        replace(_完整已采集历史日线(), freshness=HistoricalFreshness(state=state))
+
+
+@pytest.mark.parametrize("calendar_status", ["CLOSED", "HOLIDAY"])
+def test_证券研究视图在交易日历未开市时禁止当前预测(calendar_status: str) -> None:
+    """即使行情新鲜，闭市和休市也不具备当前预测的准入资格。"""
+
+    market_time = datetime(2026, 7, 14, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    status = MarketStatus(
+        market=Market.CN,
+        market_timezone="Asia/Shanghai",
+        trading_calendar_status=calendar_status,
+        market_time=market_time,
+        collected_at=market_time,
+        source_id="本地交易日历",
+        data_version="日历版本-1",
+        freshness=Freshness(state="REALTIME", age_seconds=0),
+    )
+
+    model = SecurityResearchViewModel.assemble(
+        security_id=市场证券身份(Market.CN), market_status=status
+    )
+
+    assert model.current_prediction_allowed is False
+
+
+def test_证券研究视图拒绝另一证券的指标相对强弱和板块事实() -> None:
+    """所有衍生事实都必须绑定当前证券，跨证券整批数据不得渲染。"""
+
+    other_security = 市场证券身份(Market.US)
+    market_time = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    indicator = IndicatorFact(
+        security_id=other_security,
+        name="MA5",
+        value=10.1,
+        source_id="本地指标输入",
+        market_time=market_time,
+        collected_at=market_time,
+        input_data_version="日线版本-7",
+        calculation_version="指标算法-1",
+    )
+    relative_strength = RelativeStrengthFact(
+        security_id=other_security,
+        value=0.8,
+        benchmark="沪深300",
+        source_id="本地相对强弱输入",
+        market_time=market_time,
+        collected_at=market_time,
+        input_data_version="日线版本-7",
+        calculation_version="相对强弱算法-1",
+    )
+    sector = SectorMembershipFact(
+        security_id=other_security,
+        sector_name="银行",
+        source_id="本地板块输入",
+        market_time=market_time,
+        collected_at=market_time,
+        data_version="板块版本-2",
+    )
+
+    with pytest.raises(ValueError):
+        SecurityResearchViewModel.assemble(
+            security_id=市场证券身份(Market.CN),
+            market_status=MarketService().get_market_status(Market.CN),
+            indicators=[indicator],
+            relative_strength=relative_strength,
+            sector_membership=sector,
+        )
+
+
+def test_证券研究视图只存在相对强弱事实时不显示无事实空状态() -> None:
+    """相对强弱是独立可渲染事实，不能被错误归类为全部事实缺失。"""
+
+    security_id = 市场证券身份(Market.CN)
+    market_time = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    model = SecurityResearchViewModel.assemble(
+        security_id=security_id,
+        market_status=MarketService().get_market_status(Market.CN),
+        relative_strength=RelativeStrengthFact(
+            security_id=security_id,
+            value=0.8,
+            benchmark="沪深300",
+            source_id="本地相对强弱输入",
+            market_time=market_time,
+            collected_at=market_time,
+            input_data_version="日线版本-7",
+            calculation_version="相对强弱算法-1",
+        ),
+    )
+
+    assert model.empty_state_zh is None

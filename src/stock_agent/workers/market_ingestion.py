@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from stock_agent.application.historical_market_data import (
@@ -26,7 +26,13 @@ class HistoricalDailyIngestionError(RuntimeError):
 class HistoricalFreshness:
     """历史数据的新鲜度标识，明确排除实时用途。"""
 
-    state: str = "HISTORICAL"
+    state: Literal["HISTORICAL"] = "HISTORICAL"
+
+    def __post_init__(self) -> None:
+        """拒绝将历史日线伪装为实时、近实时或其他行情状态。"""
+
+        if self.state != "HISTORICAL":
+            raise ValueError("历史日线新鲜度只能为 HISTORICAL")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +40,15 @@ class IngestedHistoricalDailyBar(HistoricalDailyBar):
     """附带历史用途标识的标准化日线。"""
 
     freshness: HistoricalFreshness = HistoricalFreshness()
+    artifact_version_id: str = ""
+
+    def __post_init__(self) -> None:
+        """确保采集结果保留归一化工件版本并只作为历史事实使用。"""
+
+        if self.freshness.state != "HISTORICAL":
+            raise ValueError("历史日线新鲜度只能为 HISTORICAL")
+        if not self.artifact_version_id.strip():
+            raise ValueError("历史日线工件版本不能为空")
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +207,7 @@ class HistoricalDailyIngestionWorker:
                 source_id=bar.source_id,
                 collected_at=bar.collected_at,
                 source_data_version=bar.source_data_version,
+                artifact_version_id=normalized_version_id,
             )
             for bar in normalized
         ]
