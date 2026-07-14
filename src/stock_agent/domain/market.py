@@ -138,8 +138,11 @@ def validate_instrument_identity(security_id: InstrumentIdentity) -> InstrumentI
         raise MarketRuleError("证券市场、交易所或币种不一致")
     if security_id.market is Market.CN and not _is_ascii_digits(security_id.display_code, 6):
         raise MarketRuleError("中国市场证券代码必须为六码 ASCII 数字")
-    if security_id.market is Market.HK and not _is_ascii_digits(security_id.display_code, 5):
-        raise MarketRuleError("香港市场证券代码必须为五位 ASCII 数字")
+    if security_id.market is Market.HK and not (
+        _is_ascii_digits(security_id.display_code, 5)
+        or _is_ascii_digits(security_id.display_code, 6)
+    ):
+        raise MarketRuleError("香港市场证券代码必须为五位或六位 ASCII 数字")
     if security_id.market is Market.US and not _is_us_code(security_id.display_code):
         raise MarketRuleError("美国市场证券代码格式无效")
     return security_id
