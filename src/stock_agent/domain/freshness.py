@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from typing import TypedDict
 
 from stock_agent.contracts.common import FreshnessState
 from stock_agent.domain.market import Market
@@ -11,6 +12,34 @@ from stock_agent.domain.market import Market
 
 class FreshnessClassificationError(ValueError):
     """表示无法安全计算行情新鲜度的时间错误。"""
+
+
+class CurrentPredictionFreshnessFact(TypedDict):
+    """当前预测判断所需的行情状态与可验证时点。"""
+
+    state: FreshnessState
+    market_time: datetime
+    collected_at: datetime
+    time_is_verifiable: bool
+
+
+def is_usable_for_current_prediction(fact: CurrentPredictionFreshnessFact) -> bool:
+    """仅允许时点可验证的实时或近实时行情进入当前预测。"""
+
+    if fact.get("time_is_verifiable") is not True:
+        return False
+
+    state = fact.get("state")
+    if state not in {"REALTIME", "NEAR_REALTIME"}:
+        return False
+
+    market_time = fact.get("market_time")
+    collected_at = fact.get("collected_at")
+    if not isinstance(market_time, datetime) or not isinstance(collected_at, datetime):
+        raise FreshnessClassificationError("当前预测新鲜度事实必须包含有效的市场时间和采集时间")
+
+    calculate_age_seconds(market_time, collected_at)
+    return True
 
 
 def classify_freshness(
