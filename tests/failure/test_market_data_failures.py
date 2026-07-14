@@ -10,8 +10,13 @@ from stock_agent.adapters.market_data.sina_codes import (
     UnsupportedSinaCodeError,
     normalize_sina_code,
 )
-from stock_agent.application.versioning_service import VersioningService
+from stock_agent.application.versioning_service import ImmutableVersionError, VersioningService
+from stock_agent.domain.freshness import (
+    FreshnessClassificationError,
+    is_usable_for_current_prediction,
+)
 from stock_agent.domain.market import InstrumentIdentity, Market
+from stock_agent.domain.market_rules import CompanyAction
 
 
 class 忽略事实记录器:
@@ -106,3 +111,206 @@ def test_新浪适配器响应缺少任一请求代码时拒绝全部行情(loca
         SinaHttpAdapter(
             lambda _url: response, 忽略事实记录器(), VersioningService(local_data_root)
         ).fetch_quotes(["sh600000", "sz000001"], datetime(2026, 7, 14, 1, 30, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    "缺失字段",
+    [
+        "trading_date",
+        "market_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "currency",
+        "adjustment_basis",
+        "source_id",
+        "collected_at",
+        "data_version",
+    ],
+)
+def test_标准化历史日线缺少任一契约字段时整批拒绝且不产生持久化记录(
+    缺失字段: str, local_data_root: Path
+) -> None:
+    """以公开标准化日线契约校验字段，不依赖特定供应商原始响应位置。"""
+
+    from stock_agent.application.historical_market_data import (
+        HistoricalDailyBarBatch,
+        HistoricalDailyBarValidationError,
+    )
+
+    完整日线 = {
+        "security_id": InstrumentIdentity(Market.CN, "SSE", "600000", "CNY"),
+        "trading_date": "2026-07-14",
+        "market_time": datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+        "open": 10.0,
+        "high": 10.3,
+        "low": 9.9,
+        "close": 10.2,
+        "volume": 1000,
+        "currency": "CNY",
+        "adjustment_basis": "none",
+        "source_id": "test-source",
+        "collected_at": datetime(2026, 7, 14, 15, 1, tzinfo=UTC),
+        "data_version": "daily-v1",
+    }
+    不完整日线 = 完整日线.copy()
+    del 不完整日线[缺失字段]
+
+    批次 = HistoricalDailyBarBatch(VersioningService(local_data_root))
+    with pytest.raises(HistoricalDailyBarValidationError, match="缺失|完整"):
+        批次.normalize_and_save([完整日线, 不完整日线])
+
+    assert not (local_data_root / "artifacts" / "market-data-raw").exists()
+    assert not (local_data_root / "artifacts" / "market-data-normalized").exists()
+
+
+@pytest.mark.parametrize("状态", ["DELAYED", "STALE", "CLOSED"])
+def test_当前预测拒绝过期或休市行情并给出不可用原因(状态: str) -> None:
+    """当前预测入口必须把不可用原因显式反馈给调用方，不能只返回裸布尔值。"""
+
+    with pytest.raises(FreshnessClassificationError, match="过期|不可用"):
+        is_usable_for_current_prediction(
+            {
+                "state": 状态,
+                "market_time": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                "collected_at": datetime(2026, 7, 14, 9, 16, tzinfo=UTC),
+                "time_is_verifiable": True,
+            }
+        )
+
+
+def test_当前预测拒绝市场时间不可验证行情并给出不可用原因() -> None:
+    """即使状态标为实时，市场时间不可验证也必须明确拒绝当前预测。"""
+
+    with pytest.raises(FreshnessClassificationError, match="不可验证|不可用"):
+        is_usable_for_current_prediction(
+            {
+                "state": "REALTIME",
+                "market_time": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                "collected_at": datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+                "time_is_verifiable": False,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("market", "exchange", "display_code", "currency"),
+    [
+        (Market.CN, "HKEX", "00001", "CNY"),
+        (Market.HK, "NASDAQ", "AAPL", "HKD"),
+        (Market.US, "SSE", "600000", "USD"),
+        (Market.HK, "HKEX", "00001", "USD"),
+    ],
+)
+def test_证券身份拒绝市场交易所或币种不一致(
+    market: Market, exchange: str, display_code: str, currency: str
+) -> None:
+    """A、H、美股解析不得把相同代码、错误交易所或错误币种猜测为有效证券。"""
+
+    with pytest.raises(ValueError, match="市场|交易所|币种"):
+        InstrumentIdentity(market, exchange, display_code, currency)
+
+
+def test_未带市场标识的非唯一显示代码必须拒绝解析() -> None:
+    """同一显示代码存在于多个市场时，查询必须要求调用方提供市场或交易所。"""
+
+    from stock_agent.domain.market import MarketRuleError, resolve_instrument_identity
+
+    候选证券 = [
+        InstrumentIdentity(Market.CN, "SZSE", "000001", "CNY"),
+        InstrumentIdentity(Market.HK, "HKEX", "000001", "HKD"),
+    ]
+
+    with pytest.raises(MarketRuleError, match="市场|交易所|非唯一"):
+        resolve_instrument_identity(display_code="000001", candidates=候选证券)
+
+
+@pytest.mark.parametrize("复权比例", [0, -1, float("inf")])
+def test_公司行动拒绝不合法复权比例(复权比例: float) -> None:
+    """复权比例必须为有限正数，不能让无效公司行动进入历史价格计算。"""
+
+    with pytest.raises(ValueError, match="复权比例"):
+        CompanyAction(
+            action_id="split-20260714",
+            action_type="split",
+            effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+            version_id="v1",
+            source_id="test-source",
+            adjustment_ratio=复权比例,
+        )
+
+
+@pytest.mark.parametrize(
+    ("action_id", "effective_at"),
+    [
+        ("", datetime(2026, 7, 14, 9, 0, tzinfo=UTC)),
+        ("split-20260714", datetime(2026, 7, 14, 9, 0)),
+    ],
+)
+def test_公司行动拒绝缺失标识或无时区日期(
+    action_id: str, effective_at: datetime
+) -> None:
+    """公司行动的标识和生效时点均是可追溯复权的最小前提。"""
+
+    with pytest.raises(ValueError, match="标识|时区"):
+        CompanyAction(
+            action_id=action_id,
+            action_type="split",
+            effective_at=effective_at,
+            version_id="v1",
+            source_id="test-source",
+        )
+
+
+def test_公司行动拒绝证券所属市场不一致() -> None:
+    """公司行动必须绑定与证券身份一致的市场，不能跨市场混用。"""
+
+    with pytest.raises(ValueError, match="证券|市场"):
+        CompanyAction(
+            action_id="split-20260714",
+            action_type="split",
+            effective_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+            version_id="v1",
+            source_id="test-source",
+            security_id=InstrumentIdentity(Market.CN, "SSE", "600000", "CNY"),
+            market=Market.US,
+        )
+
+
+def test_复权历史研究在公司行动记录缺失时明确拒绝() -> None:
+    """缺少应有的公司行动记录时，复权历史研究不能输出看似可用的结果。"""
+
+    from stock_agent.domain.market_rules import (
+        PointInTimeViolation,
+        require_company_actions_for_adjustment,
+    )
+
+    with pytest.raises(PointInTimeViolation, match="公司行动.*缺失|不可用"):
+        require_company_actions_for_adjustment(
+            security_id=InstrumentIdentity(Market.CN, "SSE", "600000", "CNY"),
+            analysis_time=datetime(2026, 7, 14, 15, 0, tzinfo=UTC),
+            actions=[],
+        )
+
+
+@pytest.mark.parametrize("dataset", ["market-data-raw", "prediction-snapshots"])
+def test_原始行情和预测快照拒绝静默覆盖(dataset: str, local_data_root: Path) -> None:
+    """相同版本标识重写必须失败，保留可追溯的既有事实。"""
+
+    service = VersioningService(local_data_root)
+    service.commit_bytes(
+        dataset=dataset,
+        version_id="v1",
+        content=b"first",
+        source_id="test-source",
+    )
+
+    with pytest.raises(ImmutableVersionError):
+        service.commit_bytes(
+            dataset=dataset,
+            version_id="v1",
+            content=b"overwrite",
+            source_id="test-source",
+        )
