@@ -168,7 +168,7 @@ def test_来源能力拒绝空市场范围() -> None:
 
 @pytest.mark.parametrize(
     ("market", "age_seconds"),
-    [(Market.CN, 6), (Market.US, 16)],
+    [(Market.CN, 6), (Market.HK, 16), (Market.US, 16)],
 )
 def test_规范化行情拒绝超过市场实时年龄上限(market: Market, age_seconds: int) -> None:
     """实时行情超过所属市场上限时，不能进入统一行情契约。"""
@@ -187,7 +187,7 @@ def test_规范化行情拒绝超过市场实时年龄上限(market: Market, age
 
 @pytest.mark.parametrize(
     ("market", "age_seconds"),
-    [(Market.CN, 5), (Market.US, 15)],
+    [(Market.CN, 5), (Market.HK, 15), (Market.US, 15)],
 )
 def test_规范化行情接受市场实时年龄上限内的行情(market: Market, age_seconds: int) -> None:
     """实时行情等于所属市场上限时仍是合法可用的行情。"""
