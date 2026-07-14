@@ -16,6 +16,7 @@ from stock_agent.adapters.market_data.registry import (
     SourceCapabilityViolationError,
     UnknownSourceError,
 )
+from stock_agent.application.market_service import HistoricalDailyBar, MarketService, MarketStatus
 from stock_agent.contracts.common import Freshness
 from stock_agent.domain.market import InstrumentIdentity, Market
 
@@ -306,4 +307,116 @@ def test_注册表拒绝与所选来源能力不一致的整批行情(
     with pytest.raises(SourceCapabilityViolationError):
         registry.fetch_quotes(
             "演示来源", ["600000"], datetime(2026, 7, 14, 9, 30, tzinfo=UTC), Market.CN
+        )
+
+
+@pytest.mark.parametrize("market", [Market.CN, Market.HK, Market.US])
+def test_市场状态查询返回跨市场必填时点与来源字段(market: Market) -> None:
+    """A股、港股和美股状态均应包含可审计的市场时点、采集时点、来源及新鲜度。"""
+
+    status = MarketService().get_market_status(market)
+
+    assert isinstance(status, MarketStatus)
+    assert status.market is market
+    assert status.market_timezone
+    assert status.trading_calendar_status
+    assert status.market_time.tzinfo is not None
+    assert status.collected_at.tzinfo is not None
+    assert status.source_id
+    assert status.freshness is not None
+
+
+@pytest.mark.parametrize("field", ["market_time", "collected_at"])
+def test_市场状态拒绝缺失市场时点或采集时点(field: str) -> None:
+    """缺少市场时点或采集时点的状态不可用于展示或后续决策。"""
+
+    payload = {
+        "market": Market.CN,
+        "market_timezone": "Asia/Shanghai",
+        "trading_calendar_status": "OPEN",
+        "market_time": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        "collected_at": datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+        "source_id": "契约来源",
+        "freshness": Freshness(state="REALTIME", age_seconds=1),
+    }
+    payload[field] = None
+
+    with pytest.raises(ValidationError):
+        MarketStatus(**payload)
+
+
+def test_历史日线包含可追溯字段且不得标为实时() -> None:
+    """历史日线应保留身份、复权、币种、来源和版本信息，且不能伪装为实时行情。"""
+
+    bar = HistoricalDailyBar(
+        security_id=市场证券身份(Market.CN),
+        trade_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
+        open=10.0,
+        high=10.5,
+        low=9.8,
+        close=10.2,
+        volume=1_000_000,
+        adjustment_basis="NONE",
+        currency="CNY",
+        source_id="契约来源",
+        market_time=datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+        collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        data_version="日线版本-1",
+        freshness=Freshness(state="CLOSED", age_seconds=0),
+    )
+
+    assert bar.security_id.market is Market.CN
+    assert bar.trade_date.isoformat() == "2026-07-13"
+    assert bar.adjustment_basis == "NONE"
+    assert bar.freshness.state != "REALTIME"
+
+
+def test_历史日线拒绝实时新鲜度标记() -> None:
+    """历史日线不得以实时新鲜度状态绕过数据时点边界。"""
+
+    with pytest.raises(ValidationError):
+        HistoricalDailyBar(
+            security_id=市场证券身份(Market.CN),
+            trade_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
+            open=10.0,
+            high=10.5,
+            low=9.8,
+            close=10.2,
+            volume=1_000_000,
+            adjustment_basis="NONE",
+            currency="CNY",
+            source_id="契约来源",
+            market_time=datetime(2026, 7, 13, 7, 0, tzinfo=UTC),
+            collected_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            data_version="日线版本-1",
+            freshness=Freshness(state="REALTIME", age_seconds=0),
+        )
+
+
+def test_历史日线查询拒绝倒置日期范围() -> None:
+    """查询起始日期晚于结束日期时必须拒绝，避免返回含义不明的数据集。"""
+
+    with pytest.raises(ValueError):
+        MarketService().get_historical_daily_bars(
+            市场证券身份(Market.CN),
+            start_date=datetime(2026, 7, 14, tzinfo=UTC).date(),
+            end_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
+        )
+
+
+def test_历史日线查询拒绝跨市场不匹配证券代码() -> None:
+    """美股身份不得使用A股六码代码，服务必须在查询边界拒绝跨市场代码。"""
+
+    cross_market_security = InstrumentIdentity(
+        market=Market.US,
+        exchange="NASDAQ",
+        display_code="600000",
+        currency="USD",
+    )
+
+    with pytest.raises(ValueError):
+        MarketService().get_historical_daily_bars(
+            cross_market_security,
+            start_date=datetime(2026, 7, 13, tzinfo=UTC).date(),
+            end_date=datetime(2026, 7, 14, tzinfo=UTC).date(),
         )
