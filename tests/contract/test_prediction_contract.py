@@ -45,14 +45,18 @@ def 完整预测输入() -> dict[str, object]:
     }
 
 
-def 量化事实引用() -> QuantitativeFactReference:
-    """构造可回溯到本地事实的量化字段引用。"""
+def 量化事实引用(覆盖字段: str) -> QuantitativeFactReference:
+    """构造覆盖单个量化字段且与预测元数据一致的本地事实引用。"""
 
     return QuantitativeFactReference(
-        reference_type="LOCAL_FACT",
+        reference_type="LOCAL",
         result_id="daily-us-v1:NASDAQ:AAPL:2026-07-14",
         source_id="local-daily-bars",
+        security_id=完整证券身份(),
+        prediction_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         data_version="daily-us-v1",
+        model_version="baseline-v1",
+        covered_fields=(覆盖字段,),
     )
 
 
@@ -60,6 +64,9 @@ def 完整预测输出() -> dict[str, object]:
     """返回一个仅用于验证契约结构的合规预测负载。"""
 
     return {
+        "security_id": 完整证券身份(),
+        "predicted_at": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        "data_version": "daily-us-v1",
         "horizon_trading_days": 5,
         "up_probability": 42.5,
         "flat_probability": 35.0,
@@ -70,7 +77,10 @@ def 完整预测输出() -> dict[str, object]:
         "freshness": "REALTIME",
         "model_version": "baseline-v1",
         "disclaimer": FIXED_RESEARCH_DISCLAIMER,
-        "quantitative_fact_references": (量化事实引用(),),
+        "quantitative_fact_references": tuple(
+            量化事实引用(字段)
+            for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+        ),
     }
 
 
@@ -133,6 +143,37 @@ def test_预测输出拒绝非规定交易日周期() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("confidence", None),
+        ("primary_evidence", ()),
+        ("risk_factors", ()),
+        ("freshness", ""),
+        ("model_version", ""),
+        ("disclaimer", None),
+    ],
+)
+def test_预测输出拒绝缺少规定安全字段(field: str, value: object) -> None:
+    """置信度、依据、风险、新鲜度、模型版本和固定提示均为不可省略字段。"""
+
+    payload = 完整预测输出()
+    payload[field] = value
+
+    with pytest.raises(ValidationError):
+        PredictionOutput(**payload)
+
+
+def test_预测输出拒绝不是字面固定值的风险提示() -> None:
+    """风险提示即使语义相近也必须与规定中文文案逐字一致。"""
+
+    payload = 完整预测输出()
+    payload["disclaimer"] = "仅供研究参考，不构成投资建议。"
+
+    with pytest.raises(ValidationError, match="研究参考，不构成投资建议"):
+        PredictionOutput(**payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
         ("up_probability", -0.1),
         ("flat_probability", -0.1),
         ("down_probability", -0.1),
@@ -144,6 +185,31 @@ def test_预测输出拒绝负概率或总和超出允许容差(field: str, valu
 
     payload = 完整预测输出()
     payload[field] = value
+
+    with pytest.raises(ValidationError, match="概率"):
+        PredictionOutput(**payload)
+
+
+@pytest.mark.parametrize("down_probability", [29.9, 30.0, 30.1])
+def test_预测输出接受概率总和处于容差边界的结果(down_probability: float) -> None:
+    """概率总和为 99.9、100.0、100.1 时仍处于允许展示的边界内。"""
+
+    payload = 完整预测输出()
+    payload.update(up_probability=40.0, flat_probability=30.0, down_probability=down_probability)
+
+    output = PredictionOutput(**payload)
+
+    assert output.up_probability + output.flat_probability + output.down_probability == pytest.approx(
+        70.0 + down_probability, abs=1e-9
+    )
+
+
+@pytest.mark.parametrize("down_probability", [29.89, 30.11])
+def test_预测输出拒绝概率总和刚越过容差边界的结果(down_probability: float) -> None:
+    """概率总和为 99.89 或 100.11 时必须拒绝，并避免浮点误差放宽边界。"""
+
+    payload = 完整预测输出()
+    payload.update(up_probability=40.0, flat_probability=30.0, down_probability=down_probability)
 
     with pytest.raises(ValidationError, match="概率"):
         PredictionOutput(**payload)
@@ -174,6 +240,68 @@ def test_预测输出拒绝没有结构化事实引用的量化数字() -> None:
     payload["quantitative_fact_references"] = ()
 
     with pytest.raises(ValidationError, match="事实引用"):
+        PredictionOutput(**payload)
+
+
+def test_预测输出拒绝未覆盖量化字段的无关引用() -> None:
+    """引用存在但未声明覆盖概率或置信度时，不能为任何量化数字背书。"""
+
+    payload = 完整预测输出()
+    payload["quantitative_fact_references"] = (量化事实引用("unrelated_metric"),)
+
+    with pytest.raises(ValidationError, match="覆盖.*字段|事实引用"):
+        PredictionOutput(**payload)
+
+
+def test_预测输出拒绝非MCP或LOCAL类型的量化事实引用() -> None:
+    """量化数字只能引用 MCP 或本地事实，不能接受自定义或未知引用类型。"""
+
+    payload = 完整预测输出()
+    payload["quantitative_fact_references"] = tuple(
+        量化事实引用(字段).model_copy(update={"reference_type": "REMOTE"})
+        for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+    )
+
+    with pytest.raises(ValidationError, match="MCP|LOCAL"):
+        PredictionOutput(**payload)
+
+
+@pytest.mark.parametrize(
+    ("reference_field", "reference_value"),
+    [
+        ("security_id", InstrumentIdentity(market=Market.US, exchange="NYSE", display_code="MSFT", currency="USD")),
+        ("prediction_time", datetime(2026, 7, 14, 9, 31, tzinfo=UTC)),
+        ("data_version", "daily-us-v2"),
+        ("model_version", "baseline-v2"),
+    ],
+)
+def test_预测输出拒绝与预测元数据不匹配的量化事实引用(
+    reference_field: str, reference_value: object
+) -> None:
+    """引用的证券、预测时点、数据版本和模型版本必须逐项匹配预测输出。"""
+
+    payload = 完整预测输出()
+    payload["quantitative_fact_references"] = tuple(
+        量化事实引用(字段).model_copy(update={reference_field: reference_value})
+        for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+    )
+
+    with pytest.raises(ValidationError, match="证券|时点|数据版本|模型版本|事实引用"):
+        PredictionOutput(**payload)
+
+
+@pytest.mark.parametrize("missing_field", ["up_probability", "flat_probability", "down_probability", "confidence"])
+def test_预测输出拒绝有数值却没有逐项覆盖引用(missing_field: str) -> None:
+    """上涨、震荡、下跌概率和置信度必须各有至少一个结构化事实引用。"""
+
+    payload = 完整预测输出()
+    payload["quantitative_fact_references"] = tuple(
+        量化事实引用(字段)
+        for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+        if 字段 != missing_field
+    )
+
+    with pytest.raises(ValidationError, match="覆盖.*字段|事实引用"):
         PredictionOutput(**payload)
 
 
