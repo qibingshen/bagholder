@@ -145,10 +145,10 @@ class MarketController:
 def _degradation_status(market_status: MarketStatus) -> str | None:
     """按交易日历、新鲜度和验证证据确定市场页面降级边界。"""
 
-    if not market_status.is_verified:
-        return "STALE"
     if market_status.trading_calendar_status != "OPEN":
         return "CLOSED"
+    if not market_status.is_verified:
+        return "STALE"
     if market_status.freshness.state not in {"REALTIME", "NEAR_REALTIME"}:
         return "STALE"
     return None

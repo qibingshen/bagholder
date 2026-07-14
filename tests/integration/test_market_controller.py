@@ -188,6 +188,45 @@ def test_控制器仅在交易日历为_OPEN_时允许市场准备状态(market:
     assert model.current_prediction_allowed is False
 
 
+@pytest.mark.parametrize(
+    ("market", "calendar_status"),
+    [
+        (Market.CN, "CLOSED"),
+        (Market.CN, "HOLIDAY"),
+        (Market.CN, "MIDDAY_BREAK"),
+        (Market.HK, "TYPHOON_SUSPENDED"),
+        (Market.US, "PRE_MARKET"),
+        (Market.US, "AFTER_HOURS"),
+    ],
+)
+def test_控制器优先将未验证的非开市日历状态降级为关闭(market: Market, calendar_status: str) -> None:
+    """非开市日历状态即使未验证也必须关闭页面，避免显示实时数据或允许当前预测。"""
+
+    from stock_agent.desktop.controllers.market_controller import MarketController
+
+    controller = MarketController(
+        market_service=_本地市场服务(
+            _市场状态(
+                market=market,
+                calendar_status=calendar_status,
+                is_verified=False,
+            )
+        ),
+        historical_daily_bars=[_历史日线()],
+    )
+
+    model = controller.build_market_overview(
+        market=market,
+        primary_index_codes=["000001"],
+        start_date=date(2026, 7, 13),
+        end_date=date(2026, 7, 13),
+    )
+
+    assert model.page_state.status == "CLOSED"
+    assert model.page_state.shows_realtime is False
+    assert model.current_prediction_allowed is False
+
+
 def test_历史日线不足时控制器返回明确空状态且不补造价格() -> None:
     """没有本地日线时必须保留目录事实并显示空状态，而不是虚构指数价格。"""
 
