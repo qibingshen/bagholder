@@ -1,11 +1,21 @@
 """验证跨市场行情新鲜度的纯规则边界。"""
 
 from datetime import UTC, datetime, timedelta
+from typing import TypedDict
 
 import pytest
 
 from stock_agent.domain.freshness import FreshnessClassificationError, classify_freshness
 from stock_agent.domain.market import Market
+
+
+class 当前预测新鲜度事实(TypedDict):
+    """当前预测入口必须同时接收状态、时点和时间可验证结论。"""
+
+    state: str
+    market_time: datetime
+    collected_at: datetime
+    time_is_verifiable: bool
 
 
 @pytest.mark.parametrize(
@@ -203,18 +213,86 @@ def test_交易日历关闭时仍拒绝未来无时区或负年龄时间(
 
 
 @pytest.mark.parametrize(
-    ("state", "expected"),
+    ("state", "age_seconds", "expected"),
     [
-        ("REALTIME", True),
-        ("NEAR_REALTIME", True),
-        ("DELAYED", False),
-        ("STALE", False),
-        ("CLOSED", False),
+        ("REALTIME", 5, True),
+        ("NEAR_REALTIME", 60, True),
+        ("DELAYED", 61, False),
+        ("STALE", 901, False),
+        ("CLOSED", 0, False),
     ],
 )
-def test_仅有效实时或近实时行情可用于当前预测(state: str, expected: bool) -> None:
-    """延迟、过期和休市行情不得进入面向当前预测的研究输入。"""
+def test_仅有效时点的实时或近实时事实可用于当前预测(
+    state: str, age_seconds: int, expected: bool
+) -> None:
+    """延迟、过期和休市事实不得进入当前预测，裸状态字符串不是可用输入。"""
 
     from stock_agent.domain import freshness
 
-    assert freshness.is_usable_for_current_prediction(state) is expected
+    collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    fact: 当前预测新鲜度事实 = {
+        "state": state,
+        "market_time": collected_at - timedelta(seconds=age_seconds),
+        "collected_at": collected_at,
+        "time_is_verifiable": True,
+    }
+
+    assert freshness.is_usable_for_current_prediction(fact) is expected
+
+
+@pytest.mark.parametrize(
+    ("state", "market_time", "collected_at"),
+    [
+        (
+            "REALTIME",
+            datetime(2026, 7, 14, 9, 30),
+            datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        ),
+        (
+            "NEAR_REALTIME",
+            datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+            datetime(2026, 7, 14, 9, 30),
+        ),
+        (
+            "REALTIME",
+            datetime(2026, 7, 14, 9, 30, 1, tzinfo=UTC),
+            datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        ),
+    ],
+)
+def test_市场时间不可验证时实时状态也不得用于当前预测(
+    state: str, market_time: datetime, collected_at: datetime
+) -> None:
+    """无时区或未来市场时间即便被伪标为实时，也必须在研究入口被阻断。"""
+
+    from stock_agent.domain import freshness
+
+    fact: 当前预测新鲜度事实 = {
+        "state": state,
+        "market_time": market_time,
+        "collected_at": collected_at,
+        "time_is_verifiable": False,
+    }
+
+    assert freshness.is_usable_for_current_prediction(fact) is False
+
+
+def test_未知新鲜度状态不得用于当前预测() -> None:
+    """未知状态必须显式拒绝或返回不可用，不能被默认分支放行。"""
+
+    from stock_agent.domain import freshness
+
+    collected_at = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+    fact: 当前预测新鲜度事实 = {
+        "state": "UNRECOGNIZED",
+        "market_time": collected_at,
+        "collected_at": collected_at,
+        "time_is_verifiable": True,
+    }
+
+    try:
+        usable = freshness.is_usable_for_current_prediction(fact)
+    except FreshnessClassificationError:
+        return
+
+    assert usable is False

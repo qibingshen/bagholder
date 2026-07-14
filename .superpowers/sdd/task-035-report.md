@@ -26,3 +26,13 @@ py -3.12 -m pytest -o addopts='' tests/property/test_freshness_rules.py -v
 ## 后续实现边界
 
 后续生产实现应在不放宽时间校验的前提下，提供当前预测可用性规则：仅经验证的 `REALTIME` 与 `NEAR_REALTIME` 可进入当前研究输入；`DELAYED`、`STALE` 与 `CLOSED` 必须被拒绝。
+
+## 审查补强
+
+本次将当前预测可用性测试的入参从裸状态字符串改为 `当前预测新鲜度事实`：该事实契约同时携带 `state`、`market_time`、`collected_at` 与 `time_is_verifiable`。新增断言覆盖：
+
+- 只有时间可验证的 `REALTIME` 与 `NEAR_REALTIME` 事实可用；
+- 即便状态被伪标为 `REALTIME` 或 `NEAR_REALTIME`，无时区时间或未来市场时间且 `time_is_verifiable=False` 时仍不可用；
+- `UNRECOGNIZED` 等未知状态必须返回不可用或显式拒绝，不能由默认分支放行。
+
+补强后再次运行相同命令：共收集 66 项，57 项通过、9 项失败，退出码为 1。9 个失败场景均因 `is_usable_for_current_prediction` 尚未实现而触发 `AttributeError`；其中包含 3 个不可验证市场时间和 1 个未知状态的新增保护场景。
