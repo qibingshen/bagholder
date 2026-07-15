@@ -238,7 +238,7 @@
 - [X] T115 [US7] 实现模型中心、门禁证据、批准、发布和回滚确认页面：`src/stock_agent/desktop/pages/model_management_page.py`
 - [X] T116 [US7] 实现 MCP 管理动作永久拒绝与服务端二次权限检查：`src/stock_agent/adapters/mcp/management_guard.py`
 - [X] T117 [US7] 编写候选模型独立验收说明：`docs/acceptance/us7-model-governance.md`
-- [ ] T118 [US7] 运行 US7 契约、发布门禁、失败与回滚测试并记录结果：`tests/contract/test_model_contract.py`、`tests/property/test_model_release_gates.py`、`tests/failure/test_model_governance_failures.py`
+- [X] T118 [US7] 运行 US7 契约、发布门禁、失败与回滚测试并记录结果：`tests/contract/test_model_contract.py`、`tests/property/test_model_release_gates.py`、`tests/failure/test_model_governance_failures.py`
 
 ## 阶段 11：跨领域验证与发布证据
 
