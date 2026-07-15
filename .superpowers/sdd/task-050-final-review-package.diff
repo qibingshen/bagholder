@@ -1,0 +1,1567 @@
+﻿# Review package: 6e1ca63..HEAD
+
+## Commits
+46d1a32 fix: harden prediction domain safety
+cf64784 test: provide dates for invalid prediction horizons
+453a70d feat: add minimal prediction domain contracts
+
+## Files changed
+ .superpowers/sdd/task-050-report.md                |  24 +
+ src/stock_agent/domain/market_rules.py             |   5 +
+ src/stock_agent/domain/prediction.py               | 574 +++++++++++++++++++++
+ tests/contract/test_prediction_contract.py         |  66 ++-
+ tests/failure/test_prediction_failures.py          | 103 ++--
+ .../test_prediction_security_regressions.py        | 187 +++++++
+ tests/property/test_prediction_labels.py           |  53 +-
+ 7 files changed, 960 insertions(+), 52 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-050-report.md b/.superpowers/sdd/task-050-report.md
+new file mode 100644
+index 0000000..d93f77d
+--- /dev/null
++++ b/.superpowers/sdd/task-050-report.md
+@@ -0,0 +1,24 @@
++# T050 预测领域实现报告
++
++## 完成内容
++
++- 新增 `src/stock_agent/domain/prediction.py`：预测输入/输出、量化事实引用、标签规则、到期结果、不可变快照及追加式仓库。
++- 为公司行动补充可得时点字段，用于预测输入与到期回填的点时校验。
++- 实现 1/5/20 个有效交易日、`>=`/`<=` 阈值分类、缺少到期价格的 `PENDING_VALIDATION`，以及概率候选的边界校验。
++- 未训练或发布模型，未联网，未生成事实数字，未触发交易。
++
++## TDD 证据
++
++实现前已执行三组目标测试，三组均因 `stock_agent.domain.prediction` 不存在而在导入期红灯。
++
++```text
++ModuleNotFoundError: No module named 'stock_agent.domain.prediction'
++```
++
++初次实现后，目标三组测试结果为 93 通过、1 失败；全量结果为 456 通过、1 失败。Ruff 与 `git diff --check` 通过。
++
++## 已知阻塞
++
++初次唯一失败位于 `tests/property/test_prediction_labels.py` 的“拒绝非规定交易日周期”测试。Hypothesis 生成非法周期 `21` 时，测试辅助函数先以 `reference_index + 21` 索引仅覆盖到 `20` 日的测试日历，抛出 `IndexError`，未调用 `resolve_actual_outcome`。
++
++已仅修正该测试夹具：在既有非连续交易日之后补充覆盖非法周期生成范围的工作日序列，不修改生产规则或断言。`resolve_actual_outcome` 现会接收非法周期并拒绝它。修正后，三组预测测试 94 通过，全量 pytest 457 通过。
+diff --git a/src/stock_agent/domain/market_rules.py b/src/stock_agent/domain/market_rules.py
+index ffb4aef..37b4248 100644
+--- a/src/stock_agent/domain/market_rules.py
++++ b/src/stock_agent/domain/market_rules.py
+@@ -37,36 +37,41 @@ class TradingCalendar:
+ 
+ @dataclass(frozen=True)
+ class CompanyAction:
+     """保存公司行动的来源与版本，使复权和历史分析能按当时事实重建。"""
+ 
+     action_id: str
+     action_type: str
+     effective_at: datetime
+     version_id: str
+     source_id: str
++    available_at: datetime | None = None
+     adjustment_ratio: int | float | Decimal | None = None
+     security_id: InstrumentIdentity | None = None
+     market: Market | None = None
+ 
+     def __post_init__(self) -> None:
+         if not all(
+             (
+                 self.action_id.strip(),
+                 self.action_type.strip(),
+                 self.version_id.strip(),
+                 self.source_id.strip(),
+             )
+         ):
+             raise ValueError("公司行动必须包含标识、类型、来源和版本")
+         if self.effective_at.tzinfo is None or self.effective_at.utcoffset() is None:
+             raise ValueError("公司行动生效时间必须带时区")
++        if self.available_at is not None and (
++            self.available_at.tzinfo is None or self.available_at.utcoffset() is None
++        ):
++            raise ValueError("公司行动可得时间必须带时区")
+         if self.adjustment_ratio is not None:
+             ratio = self.adjustment_ratio
+             if isinstance(ratio, Decimal):
+                 is_valid_ratio = ratio.is_finite() and ratio > 0
+             elif isinstance(ratio, float):
+                 is_valid_ratio = math.isfinite(ratio) and ratio > 0
+             elif isinstance(ratio, int) and not isinstance(ratio, bool):
+                 is_valid_ratio = ratio > 0
+             else:
+                 is_valid_ratio = False
+diff --git a/src/stock_agent/domain/prediction.py b/src/stock_agent/domain/prediction.py
+new file mode 100644
+index 0000000..cd45796
+--- /dev/null
++++ b/src/stock_agent/domain/prediction.py
+@@ -0,0 +1,574 @@
++"""定义离线研究预测的输入、标签、不可变快照与到期验证边界。"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import date, datetime
++from decimal import Decimal
++from enum import StrEnum
++from hashlib import sha256
++from typing import Literal
++
++from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
++
++from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
++
++FIXED_RESEARCH_DISCLAIMER = "研究参考，不构成投资建议"
++_HORIZONS = frozenset({1, 5, 20})
++_NUMERIC_FIELDS = frozenset(
++    {"up_probability", "flat_probability", "down_probability", "confidence"}
++)
++
++
++class CurrentPredictionUnavailableError(ValueError):
++    """表示当前事实不满足安全生成研究预测的时点与新鲜度约束。"""
++
++
++class PredictionLabelRuleError(ValueError):
++    """表示标签、概率或到期事实违反已快照的研究规则。"""
++
++
++class ImmutablePredictionSnapshotError(ValueError):
++    """表示试图覆盖既有预测快照或到期结果。"""
++
++
++class PredictionLabel(StrEnum):
++    UP = "UP"
++    FLAT = "FLAT"
++    DOWN = "DOWN"
++
++
++class ActualOutcomeStatus(StrEnum):
++    VALIDATED = "VALIDATED"
++    PENDING_VALIDATION = "PENDING_VALIDATION"
++
++
++class PredictionDisplayState(StrEnum):
++    CURRENT_AVAILABLE = "CURRENT_AVAILABLE"
++    CURRENT_UNAVAILABLE = "CURRENT_UNAVAILABLE"
++    HISTORICAL_SNAPSHOT = "HISTORICAL_SNAPSHOT"
++
++
++class QuantitativeFactReference(BaseModel):
++    """为每个量化展示数字保留可核验的本地或 MCP 事实来源。"""
++
++    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
++    reference_type: Literal["MCP", "LOCAL"]
++    result_id: str
++    source_id: str
++    security_id: object
++    prediction_time: datetime
++    data_version: str
++    feature_version: str
++    model_version: str
++    label_rule_version: str
++    covered_fields: tuple[str, ...] = ()
++    field_evidence: tuple[QuantitativeFieldEvidence, ...]
++
++    @model_validator(mode="after")
++    def validate_reference_identity(self) -> QuantitativeFactReference:
++        if (
++            any(
++                not isinstance(value, str) or not value.strip() or value == "UNSPECIFIED"
++                for value in (
++                    self.result_id,
++                    self.source_id,
++                    self.data_version,
++                    self.feature_version,
++                    self.model_version,
++                    self.label_rule_version,
++                )
++            )
++            or self.security_id is None
++        ):
++            raise ValueError("事实引用必须包含非空且已指定的标识与版本")
++        _require_aware(self.prediction_time, "事实引用预测时点")
++        if not self.field_evidence:
++            raise ValueError("事实引用必须包含逐字段数值、哈希和值证据")
++        return self
++
++
++class QuantitativeFieldEvidence(BaseModel):
++    """绑定一个展示数值及其可复核摘要，覆盖声明本身不能构成证据。"""
++
++    model_config = ConfigDict(frozen=True)
++    field_name: str
++    numeric_value: Decimal
++    value_hash: str
++    value_evidence: str
++
++    @model_validator(mode="after")
++    def validate_value_evidence(self) -> QuantitativeFieldEvidence:
++        if (
++            not self.field_name.strip()
++            or not self.value_evidence.strip()
++            or not self.numeric_value.is_finite()
++        ):
++            raise ValueError("数值证据必须完整且为有限数")
++        if self.value_hash != quantitative_value_hash(self.field_name, self.numeric_value):
++            raise ValueError("数值证据哈希不匹配")
++        return self
++
++
++def quantitative_value_hash(field_name: str, value: Decimal | float) -> str:
++    """返回稳定的字段值摘要，仅供验证本地或 MCP 事实的逐字段绑定。"""
++    return sha256(f"{field_name}:{Decimal(str(value)).normalize()}".encode()).hexdigest()
++
++
++def _require_aware(value: datetime, name: str) -> None:
++    if value.tzinfo is None or value.utcoffset() is None:
++        raise ValueError(f"{name}必须带时区")
++
++
++class PredictionInput(BaseModel):
++    """只接收预测时点已经可得、可验证的事实，禁止混入到期结果。"""
++
++    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
++    security_id: object
++    predicted_at: datetime
++    market_time: datetime
++    collected_at: datetime
++    source_id: str | None = "UNSPECIFIED"
++    data_version: str
++    feature_version: str
++    trading_calendar_version: str | None = None
++    calendar_available_at: datetime | None = None
++    feature_available_at: datetime | None = None
++    feature_cutoff_at: datetime | None = None
++    model_version: str
++    prediction_label_rule_version: str | None = None
++    freshness: str = "REALTIME"
++    time_is_verifiable: bool = True
++    is_current_data_available: bool
++    company_actions: tuple[CompanyAction, ...] = ()
++    reference_total_return_adjusted_price: Decimal | None = None
++    reference_price_available_at: datetime | None = None
++
++    def __init__(self, **data: object) -> None:
++        try:
++            super().__init__(**data)
++        except ValidationError as exc:
++            if data.get("is_current_data_available") is False:
++                raise CurrentPredictionUnavailableError("当前预测数据不可用") from exc
++            if data.get("freshness") in {"DELAYED", "STALE", "CLOSED"}:
++                raise CurrentPredictionUnavailableError(
++                    "延迟、过期或闭市行情不可用于当前预测"
++                ) from exc
++            predicted_at = data.get("predicted_at")
++            if isinstance(predicted_at, datetime) and any(
++                isinstance(data.get(field), datetime) and data[field] > predicted_at
++                for field in ("calendar_available_at", "feature_available_at", "feature_cutoff_at")
++            ):
++                raise CurrentPredictionUnavailableError(
++                    "日历、特征或截止事实在预测时点后才可得"
++                ) from exc
++            if isinstance(predicted_at, datetime) and any(
++                action.effective_at > predicted_at
++                or (action.available_at and action.available_at > predicted_at)
++                for action in data.get("company_actions", ())
++                if isinstance(action, CompanyAction)
++            ):
++                raise CurrentPredictionUnavailableError("公司行动在预测时点后才可得或生效") from exc
++            if data.get("source_id") is None or data.get("source_id") == "UNSPECIFIED":
++                raise CurrentPredictionUnavailableError(
++                    "来源、市场时间、采集时间、数据版本或特征版本不可验证"
++                ) from exc
++            raise
++
++    @model_validator(mode="after")
++    def validate_current_facts(self) -> PredictionInput:
++        required = {
++            "市场时间": self.market_time,
++            "采集时间": self.collected_at,
++            "数据版本": self.data_version,
++            "特征版本": self.feature_version,
++            "模型版本": self.model_version,
++            "证券": self.security_id,
++        }
++        required["来源"] = self.source_id
++        if any(
++            value is None or (isinstance(value, str) and not value.strip())
++            for value in required.values()
++        ):
++            raise CurrentPredictionUnavailableError(
++                "来源、市场时间、采集时间、数据版本和特征版本必须可验证"
++            )
++        if self.source_id == "UNSPECIFIED":
++            raise CurrentPredictionUnavailableError("来源不得为 UNSPECIFIED")
++        for name, value in (
++            ("预测时点", self.predicted_at),
++            ("市场时点", self.market_time),
++            ("采集时点", self.collected_at),
++        ):
++            _require_aware(value, name)
++        if not self.is_current_data_available:
++            raise CurrentPredictionUnavailableError("当前预测数据不可用")
++        if not self.time_is_verifiable:
++            raise CurrentPredictionUnavailableError("市场时间不可验证，当前预测不可用")
++        if self.freshness not in {"REALTIME", "NEAR_REALTIME"}:
++            raise CurrentPredictionUnavailableError("延迟、过期或闭市行情不可用于当前预测")
++        for label, value in (
++            ("日历", self.calendar_available_at),
++            ("特征", self.feature_available_at),
++            ("特征截止", self.feature_cutoff_at),
++        ):
++            if value is not None:
++                _require_aware(value, f"{label}可得时点")
++            if value is not None and value > self.predicted_at:
++                raise CurrentPredictionUnavailableError(f"{label}在预测时点后才可得")
++        for action in self.company_actions:
++            if (
++                action.security_id is None
++                or action.market is None
++                or action.security_id != self.security_id
++            ):
++                raise CurrentPredictionUnavailableError("公司行动必须绑定目标证券与市场")
++            if action.effective_at > self.predicted_at or (
++                action.available_at and action.available_at > self.predicted_at
++            ):
++                raise CurrentPredictionUnavailableError("公司行动在预测时点后才可得或生效")
++        return self
++
++    @model_validator(mode="before")
++    @classmethod
++    def reject_expiry_facts(cls, data: object) -> object:
++        if isinstance(data, dict) and {
++            "expiry_total_return_adjusted_price",
++            "expiry_price_available_at",
++        } & set(data):
++            raise ValueError("预测输入不得包含到期价格")
++        return data
++
++
++def validate_prediction_probabilities(
++    up: Decimal | float, flat: Decimal | float, down: Decimal | float
++) -> None:
++    """验证三项候选概率，不生成预测、收益承诺或交易动作。"""
++    try:
++        values = tuple(Decimal(str(value)) for value in (up, flat, down))
++    except Exception as exc:
++        raise PredictionLabelRuleError("概率必须为有限数值") from exc
++    if any(not value.is_finite() for value in values):
++        raise PredictionLabelRuleError("概率必须为有限数值")
++    if any(value < 0 or value > 100 for value in values) or not Decimal("99.9") <= sum(
++        values
++    ) <= Decimal("100.1"):
++        raise PredictionLabelRuleError("概率必须逐项在 0 到 100 且总和在允许容差内")
++
++
++class PredictionOutput(BaseModel):
++    """研究展示输出；所有量化数字必须由匹配版本的事实引用逐项覆盖。"""
++
++    model_config = ConfigDict(arbitrary_types_allowed=True)
++    security_id: object
++    predicted_at: datetime
++    data_version: str
++    feature_version: str | None = None
++    horizon_trading_days: int
++    up_probability: float
++    flat_probability: float
++    down_probability: float
++    confidence: float = Field(ge=0, le=1)
++    primary_evidence: tuple[str, ...]
++    risk_factors: tuple[str, ...]
++    freshness: str
++    model_version: str
++    disclaimer: str
++    quantitative_fact_references: tuple[QuantitativeFactReference, ...]
++    label_rule_version: str | None = None
++
++    @model_validator(mode="after")
++    def validate_research_contract(self) -> PredictionOutput:
++        if self.horizon_trading_days not in _HORIZONS:
++            raise ValueError("预测周期必须是规定交易日")
++        validate_prediction_probabilities(
++            self.up_probability, self.flat_probability, self.down_probability
++        )
++        if self.disclaimer != FIXED_RESEARCH_DISCLAIMER:
++            raise ValueError(FIXED_RESEARCH_DISCLAIMER)
++        _require_aware(self.predicted_at, "预测时点")
++        if (
++            not self.primary_evidence
++            or not self.risk_factors
++            or any(not item.strip() for item in (*self.primary_evidence, *self.risk_factors))
++        ):
++            raise ValueError("主要依据和风险因素必须非空")
++        if any(
++            not isinstance(value, str) or not value.strip()
++            for value in (
++                self.data_version,
++                self.feature_version,
++                self.model_version,
++                self.label_rule_version,
++            )
++        ):
++            raise ValueError("数据、特征、模型和规则版本必须非空")
++        text = " ".join((*self.primary_evidence, *self.risk_factors, self.disclaimer))
++        if any(term in text for term in ("保证", "收益", "买入", "卖出", "立即买", "交易指令")):
++            raise ValueError("研究输出不得包含收益承诺或买卖指令")
++        evidence_by_field: dict[str, QuantitativeFieldEvidence] = {}
++        for reference in self.quantitative_fact_references:
++            if reference.reference_type not in {"MCP", "LOCAL"}:
++                raise ValueError("事实引用类型必须为 MCP 或 LOCAL")
++            if (
++                reference.security_id != self.security_id
++                or reference.prediction_time != self.predicted_at
++            ):
++                raise ValueError("事实引用的证券或时点不匹配")
++            if (
++                reference.data_version != self.data_version
++                or reference.feature_version != self.feature_version
++                or reference.model_version != self.model_version
++                or reference.label_rule_version != self.label_rule_version
++            ):
++                raise ValueError("事实引用的版本不匹配")
++            for evidence in reference.field_evidence:
++                if evidence.field_name in evidence_by_field:
++                    raise ValueError("每个量化字段只能有一条绑定证据")
++                evidence_by_field[evidence.field_name] = evidence
++        for field_name in _NUMERIC_FIELDS:
++            evidence = evidence_by_field.get(field_name)
++            if evidence is None or evidence.numeric_value != Decimal(
++                str(getattr(self, field_name))
++            ):
++                raise ValueError("事实引用必须逐字段绑定数值、哈希和值证据")
++        return self
++
++
++class PredictionLabelRule(BaseModel):
++    """按版本保存 1、5、20 个交易日的涨跌阈值。"""
++
++    model_config = ConfigDict(frozen=True)
++    version_id: str
++    thresholds: dict[int, Decimal]
++
++    @model_validator(mode="after")
++    def validate_thresholds(self) -> PredictionLabelRule:
++        if set(self.thresholds) != _HORIZONS or any(
++            value <= 0 for value in self.thresholds.values()
++        ):
++            raise PredictionLabelRuleError("标签规则必须包含 1、5、20 日的正阈值")
++        return self
++
++
++@dataclass(frozen=True)
++class ActualOutcome:
++    prediction_snapshot_id: str
++    prediction_time: datetime
++    horizon_trading_days: int
++    reference_trading_day: date
++    expiry_trading_day: date
++    trading_calendar_version: str
++    reference_total_return_adjusted_price: Decimal
++    expiry_total_return_adjusted_price: Decimal | None
++    status: ActualOutcomeStatus
++    label: PredictionLabel | None
++    label_rule_version: str
++    pending_reason: str | None = None
++
++    def with_label_rule_version(self, version_id: str) -> ActualOutcome:
++        if version_id != self.label_rule_version:
++            raise PredictionLabelRuleError("规则版本不可回写")
++        return self
++
++
++def resolve_actual_outcome(
++    *,
++    prediction_snapshot_id: str,
++    prediction_time: datetime,
++    horizon_trading_days: int,
++    reference_trading_day: date,
++    expiry_trading_day: date,
++    trading_calendar: TradingCalendar,
++    trading_calendar_version: str,
++    reference_total_return_adjusted_price: Decimal,
++    expiry_total_return_adjusted_price: Decimal | None,
++    expiry_price_available_at: datetime | None,
++    validated_at: datetime,
++    prediction_label_rule: PredictionLabelRule,
++    pending_reason: str | None = None,
++    snapshot_trading_calendar_version: str | None = None,
++    calendar_available_at: datetime | None = None,
++    snapshot_label_rule_version: str | None = None,
++    label_rule_available_at: datetime | None = None,
++    company_actions: tuple[CompanyAction, ...] = (),
++    company_actions_available_at: datetime | None = None,
++) -> ActualOutcome:
++    """独立解析到期事实；缺价或无效到期日仅形成待验证结果。"""
++    for name, value in (("预测时点", prediction_time), ("验证时点", validated_at)):
++        _require_aware(value, name)
++    if horizon_trading_days not in _HORIZONS:
++        raise PredictionLabelRuleError("交易日周期不受支持")
++    if trading_calendar.version_id != trading_calendar_version or (
++        snapshot_trading_calendar_version
++        and trading_calendar_version != snapshot_trading_calendar_version
++    ):
++        raise PredictionLabelRuleError("日历版本不匹配，禁止回写")
++    if (
++        snapshot_label_rule_version
++        and prediction_label_rule.version_id != snapshot_label_rule_version
++    ):
++        raise PredictionLabelRuleError("规则版本不匹配，禁止回写")
++    for value, name in (
++        (expiry_price_available_at, "价格可得时点"),
++        (calendar_available_at, "日历可得时点"),
++        (label_rule_available_at, "规则可得时点"),
++        (company_actions_available_at, "公司行动可得时点"),
++    ):
++        if value is not None and value > validated_at:
++            raise PredictionLabelRuleError(f"{name}晚于验证边界")
++    if any(
++        action.available_at is not None and action.available_at > validated_at
++        for action in company_actions
++    ):
++        raise PredictionLabelRuleError("公司行动可得时点晚于验证边界")
++    if (
++        not trading_calendar.is_trading_day(expiry_trading_day)
++        or not trading_calendar.is_trading_day(reference_trading_day)
++        or expiry_total_return_adjusted_price is None
++        or expiry_price_available_at is None
++        or validated_at.date() <= expiry_trading_day
++    ):
++        return ActualOutcome(
++            prediction_snapshot_id,
++            prediction_time,
++            horizon_trading_days,
++            reference_trading_day,
++            expiry_trading_day,
++            trading_calendar_version,
++            reference_total_return_adjusted_price,
++            expiry_total_return_adjusted_price,
++            ActualOutcomeStatus.PENDING_VALIDATION,
++            None,
++            prediction_label_rule.version_id,
++            pending_reason,
++        )
++    days = sorted(trading_calendar.trading_days)
++    if days.index(expiry_trading_day) != days.index(reference_trading_day) + horizon_trading_days:
++        raise PredictionLabelRuleError("到期日必须按市场有效交易日计算")
++    change = expiry_total_return_adjusted_price / reference_total_return_adjusted_price - Decimal(
++        "1"
++    )
++    threshold = prediction_label_rule.thresholds[horizon_trading_days]
++    label = (
++        PredictionLabel.UP
++        if change >= threshold
++        else PredictionLabel.DOWN
++        if change <= -threshold
++        else PredictionLabel.FLAT
++    )
++    return ActualOutcome(
++        prediction_snapshot_id,
++        prediction_time,
++        horizon_trading_days,
++        reference_trading_day,
++        expiry_trading_day,
++        trading_calendar_version,
++        reference_total_return_adjusted_price,
++        expiry_total_return_adjusted_price,
++        ActualOutcomeStatus.VALIDATED,
++        label,
++        prediction_label_rule.version_id,
++    )
++
++
++@dataclass(frozen=True)
++class PredictionSnapshot:
++    snapshot_id: str
++    prediction_input: PredictionInput
++    prediction_output: PredictionOutput
++    generated_at: datetime
++
++    def display_state_for_current_data(self, freshness: str) -> PredictionDisplayState:
++        return (
++            PredictionDisplayState.CURRENT_AVAILABLE
++            if freshness in {"REALTIME", "NEAR_REALTIME"}
++            else PredictionDisplayState.CURRENT_UNAVAILABLE
++        )
++
++    def display_state_for_history(self) -> PredictionDisplayState:
++        return PredictionDisplayState.HISTORICAL_SNAPSHOT
++
++
++class PredictionSnapshotStore:
++    """内存追加式快照仓库，不提供覆盖或更新入口。"""
++
++    def __init__(self) -> None:
++        self._snapshots: dict[str, PredictionSnapshot] = {}
++        self._outcomes: dict[str, list[ActualOutcome]] = {}
++
++    def append(
++        self,
++        snapshot_id: str,
++        prediction_input: PredictionInput,
++        prediction_output: PredictionOutput,
++    ) -> PredictionSnapshot:
++        if snapshot_id in self._snapshots:
++            raise ImmutablePredictionSnapshotError("预测快照只能追加，不能覆盖")
++        if prediction_input.predicted_at != prediction_output.predicted_at:
++            raise ImmutablePredictionSnapshotError("快照输入输出预测时点必须一致")
++        snapshot = PredictionSnapshot(
++            snapshot_id,
++            prediction_input.model_copy(deep=True),
++            prediction_output.model_copy(deep=True),
++            prediction_input.predicted_at,
++        )
++        self._snapshots[snapshot_id] = snapshot
++        return snapshot
++
++    def append_actual_outcome(self, outcome: ActualOutcome) -> ActualOutcome:
++        if outcome.prediction_snapshot_id not in self._snapshots or self._outcomes.get(
++            outcome.prediction_snapshot_id
++        ):
++            raise ImmutablePredictionSnapshotError("到期结果只能追加且不可重复或覆盖")
++        snapshot = self._snapshots[outcome.prediction_snapshot_id]
++        if outcome.prediction_time != snapshot.prediction_input.predicted_at:
++            raise ImmutablePredictionSnapshotError("到期结果预测时点必须由快照派生")
++        if outcome.horizon_trading_days != snapshot.prediction_output.horizon_trading_days:
++            raise ImmutablePredictionSnapshotError("到期结果周期必须由快照派生")
++        if outcome.trading_calendar_version != snapshot.prediction_input.trading_calendar_version:
++            raise ImmutablePredictionSnapshotError("到期结果日历版本必须与快照一致")
++        if outcome.label_rule_version != snapshot.prediction_input.prediction_label_rule_version:
++            raise ImmutablePredictionSnapshotError("到期结果规则版本必须与快照一致")
++        stored = ActualOutcome(**outcome.__dict__)
++        self._outcomes.setdefault(outcome.prediction_snapshot_id, []).append(stored)
++        return stored
++
++    def actual_outcomes_for(self, snapshot_id: str) -> tuple[ActualOutcome, ...]:
++        return tuple(self._outcomes.get(snapshot_id, ()))
++
++
++def generate_simple_baseline_prediction(
++    prediction_input: PredictionInput,
++    *,
++    horizon_trading_days: int,
++    primary_evidence: tuple[str, ...],
++    risk_factors: tuple[str, ...],
++    quantitative_fact_references: tuple[QuantitativeFactReference, ...],
++) -> PredictionOutput:
++    """基于预测时点已可得的本地事实生成固定简单基准概率，不训练、发布或交易。"""
++    if any(reference.reference_type != "LOCAL" for reference in quantitative_fact_references):
++        raise CurrentPredictionUnavailableError("简单基准只接受预测时点可用的本地事实")
++    if any(
++        reference.prediction_time > prediction_input.predicted_at
++        for reference in quantitative_fact_references
++    ):
++        raise CurrentPredictionUnavailableError("简单基准不得使用未来事实")
++    return PredictionOutput(
++        security_id=prediction_input.security_id,
++        predicted_at=prediction_input.predicted_at,
++        data_version=prediction_input.data_version,
++        feature_version=prediction_input.feature_version,
++        horizon_trading_days=horizon_trading_days,
++        up_probability=Decimal("34"),
++        flat_probability=Decimal("33"),
++        down_probability=Decimal("33"),
++        confidence=Decimal("0.5"),
++        primary_evidence=primary_evidence,
++        risk_factors=risk_factors,
++        freshness=prediction_input.freshness,
++        model_version=prediction_input.model_version,
++        label_rule_version=prediction_input.prediction_label_rule_version or "",
++        disclaimer=FIXED_RESEARCH_DISCLAIMER,
++        quantitative_fact_references=quantitative_fact_references,
++    )
+diff --git a/tests/contract/test_prediction_contract.py b/tests/contract/test_prediction_contract.py
+index a20e3fd..de26e4b 100644
+--- a/tests/contract/test_prediction_contract.py
++++ b/tests/contract/test_prediction_contract.py
+@@ -1,27 +1,30 @@
+ """验证预测输入、输出和不可变快照的量化安全契约。"""
+ 
+ from datetime import UTC, datetime
++from decimal import Decimal
+ 
+ import pytest
+ from pydantic import ValidationError
+ 
+ from stock_agent.domain.market import InstrumentIdentity, Market
+ from stock_agent.domain.prediction import (
+     FIXED_RESEARCH_DISCLAIMER,
+     CurrentPredictionUnavailableError,
+     ImmutablePredictionSnapshotError,
+     PredictionDisplayState,
+     PredictionInput,
+     PredictionOutput,
+     PredictionSnapshotStore,
+     QuantitativeFactReference,
++    QuantitativeFieldEvidence,
++    quantitative_value_hash,
+ )
+ 
+ 
+ def 完整证券身份() -> InstrumentIdentity:
+     """构造仅供预测契约使用的美国证券身份。"""
+ 
+     return InstrumentIdentity(
+         market=Market.US,
+         exchange="NASDAQ",
+         display_code="AAPL",
+@@ -33,56 +36,75 @@ def 完整预测输入() -> dict[str, object]:
+     """返回可审计预测输入所需的全部事实字段。"""
+ 
+     market_time = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+     return {
+         "security_id": 完整证券身份(),
+         "predicted_at": market_time,
+         "market_time": market_time,
+         "collected_at": market_time,
+         "data_version": "daily-us-v1",
+         "feature_version": "features-v1",
++        "source_id": "local-daily-bars",
+         "model_version": "baseline-v1",
+         "is_current_data_available": True,
+     }
+ 
+ 
+ def 量化事实引用(覆盖字段: str) -> QuantitativeFactReference:
+     """构造覆盖单个量化字段且与预测元数据一致的本地事实引用。"""
+ 
++    value = {
++        "up_probability": Decimal("42.5"),
++        "flat_probability": Decimal("35"),
++        "down_probability": Decimal("22.5"),
++        "confidence": Decimal("0.61"),
++    }.get(覆盖字段, Decimal("0"))
+     return QuantitativeFactReference(
+         reference_type="LOCAL",
+         result_id="daily-us-v1:NASDAQ:AAPL:2026-07-14",
+         source_id="local-daily-bars",
+         security_id=完整证券身份(),
+         prediction_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+         data_version="daily-us-v1",
++        feature_version="features-v1",
+         model_version="baseline-v1",
++        label_rule_version="prediction-label-v1",
+         covered_fields=(覆盖字段,),
++        field_evidence=(
++            QuantitativeFieldEvidence(
++                field_name=覆盖字段,
++                numeric_value=value,
++                value_hash=quantitative_value_hash(覆盖字段, value),
++                value_evidence="本地可复核事实",
++            ),
++        ),
+     )
+ 
+ 
+ def 完整预测输出() -> dict[str, object]:
+     """返回一个仅用于验证契约结构的合规预测负载。"""
+ 
+     return {
+         "security_id": 完整证券身份(),
+         "predicted_at": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+         "data_version": "daily-us-v1",
++        "feature_version": "features-v1",
+         "horizon_trading_days": 5,
+         "up_probability": 42.5,
+         "flat_probability": 35.0,
+         "down_probability": 22.5,
+         "confidence": 0.61,
+         "primary_evidence": ("五日均线高于二十日均线",),
+         "risk_factors": ("财报披露前波动可能放大",),
+         "freshness": "REALTIME",
+         "model_version": "baseline-v1",
++        "label_rule_version": "prediction-label-v1",
+         "disclaimer": FIXED_RESEARCH_DISCLAIMER,
+         "quantitative_fact_references": tuple(
+             量化事实引用(字段)
+             for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+         ),
+     }
+ 
+ 
+ @pytest.mark.parametrize(
+     ("field", "value"),
+@@ -134,21 +156,22 @@ def test_预测输出拒绝非规定交易日周期() -> None:
+     """任意非 1、5、20 个交易日的周期均不得展示为预测结果。"""
+ 
+     payload = 完整预测输出()
+     payload["horizon_trading_days"] = 10
+ 
+     with pytest.raises(ValidationError, match="交易日"):
+         PredictionOutput(**payload)
+ 
+ 
+ @pytest.mark.parametrize(
+-    "field", ["confidence", "primary_evidence", "risk_factors", "freshness", "model_version", "disclaimer"]
++    "field",
++    ["confidence", "primary_evidence", "risk_factors", "freshness", "model_version", "disclaimer"],
+ )
+ def test_预测输出拒绝缺少规定安全字段(field: str) -> None:
+     """置信度、依据、风险、新鲜度、模型版本和固定提示均为不可省略字段。"""
+ 
+     payload = 完整预测输出()
+     payload.pop(field)
+ 
+     with pytest.raises(ValidationError):
+         PredictionOutput(**payload)
+ 
+@@ -181,25 +204,46 @@ def test_预测输出拒绝负概率或总和超出允许容差(field: str, valu
+     with pytest.raises(ValidationError, match="概率"):
+         PredictionOutput(**payload)
+ 
+ 
+ @pytest.mark.parametrize("down_probability", [29.9, 30.0, 30.1])
+ def test_预测输出接受概率总和处于容差边界的结果(down_probability: float) -> None:
+     """概率总和为 99.9、100.0、100.1 时仍处于允许展示的边界内。"""
+ 
+     payload = 完整预测输出()
+     payload.update(up_probability=40.0, flat_probability=30.0, down_probability=down_probability)
++    payload["quantitative_fact_references"] = tuple(
++        量化事实引用(field).model_copy(
++            update={
++                "field_evidence": (
++                    QuantitativeFieldEvidence(
++                        field_name=field,
++                        numeric_value=Decimal(str(value)),
++                        value_hash=quantitative_value_hash(field, Decimal(str(value))),
++                        value_evidence="本地可复核事实",
++                    ),
++                )
++            }
++        )
++        for field, value in (
++            ("up_probability", 40.0),
++            ("flat_probability", 30.0),
++            ("down_probability", down_probability),
++            ("confidence", 0.61),
++        )
++    )
+ 
+     output = PredictionOutput(**payload)
+ 
+-    assert output.up_probability + output.flat_probability + output.down_probability == pytest.approx(
+-        70.0 + down_probability, abs=1e-9
++    assert (
++        output.up_probability + output.flat_probability + output.down_probability
++        == pytest.approx(70.0 + down_probability, abs=1e-9)
+     )
+ 
+ 
+ @pytest.mark.parametrize("down_probability", [29.89, 30.11])
+ def test_预测输出拒绝概率总和刚越过容差边界的结果(down_probability: float) -> None:
+     """概率总和为 99.89 或 100.11 时必须拒绝，并避免浮点误差放宽边界。"""
+ 
+     payload = 完整预测输出()
+     payload.update(up_probability=40.0, flat_probability=30.0, down_probability=down_probability)
+ 
+@@ -254,42 +298,49 @@ def test_预测输出拒绝非MCP或LOCAL类型的量化事实引用() -> None:
+         for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+     )
+ 
+     with pytest.raises(ValidationError, match="MCP|LOCAL"):
+         PredictionOutput(**payload)
+ 
+ 
+ @pytest.mark.parametrize(
+     ("reference_field", "reference_value"),
+     [
+-        ("security_id", InstrumentIdentity(market=Market.US, exchange="NYSE", display_code="MSFT", currency="USD")),
++        (
++            "security_id",
++            InstrumentIdentity(
++                market=Market.US, exchange="NYSE", display_code="MSFT", currency="USD"
++            ),
++        ),
+         ("prediction_time", datetime(2026, 7, 14, 9, 31, tzinfo=UTC)),
+         ("data_version", "daily-us-v2"),
+         ("model_version", "baseline-v2"),
+     ],
+ )
+ def test_预测输出拒绝与预测元数据不匹配的量化事实引用(
+     reference_field: str, reference_value: object
+ ) -> None:
+     """引用的证券、预测时点、数据版本和模型版本必须逐项匹配预测输出。"""
+ 
+     payload = 完整预测输出()
+     payload["quantitative_fact_references"] = tuple(
+         量化事实引用(字段).model_copy(update={reference_field: reference_value})
+         for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+     )
+ 
+     with pytest.raises(ValidationError, match="证券|时点|数据版本|模型版本|事实引用"):
+         PredictionOutput(**payload)
+ 
+ 
+-@pytest.mark.parametrize("missing_field", ["up_probability", "flat_probability", "down_probability", "confidence"])
++@pytest.mark.parametrize(
++    "missing_field", ["up_probability", "flat_probability", "down_probability", "confidence"]
++)
+ def test_预测输出拒绝有数值却没有逐项覆盖引用(missing_field: str) -> None:
+     """上涨、震荡、下跌概率和置信度必须各有至少一个结构化事实引用。"""
+ 
+     payload = 完整预测输出()
+     payload["quantitative_fact_references"] = tuple(
+         量化事实引用(字段)
+         for 字段 in ("up_probability", "flat_probability", "down_probability", "confidence")
+         if 字段 != missing_field
+     )
+ 
+@@ -307,13 +358,16 @@ def test_预测快照只允许追加且当前与历史过期展示语义不同()
+         prediction_output=PredictionOutput(**完整预测输出()),
+     )
+ 
+     with pytest.raises(ImmutablePredictionSnapshotError, match="覆盖"):
+         store.append(
+             snapshot_id=snapshot.snapshot_id,
+             prediction_input=PredictionInput(**完整预测输入()),
+             prediction_output=PredictionOutput(**完整预测输出()),
+         )
+ 
+-    assert snapshot.display_state_for_current_data("STALE") is PredictionDisplayState.CURRENT_UNAVAILABLE
++    assert (
++        snapshot.display_state_for_current_data("STALE")
++        is PredictionDisplayState.CURRENT_UNAVAILABLE
++    )
+     assert snapshot.display_state_for_history() is PredictionDisplayState.HISTORICAL_SNAPSHOT
+     assert snapshot.generated_at == datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+diff --git a/tests/failure/test_prediction_failures.py b/tests/failure/test_prediction_failures.py
+index dd4d904..4e3c4ff 100644
+--- a/tests/failure/test_prediction_failures.py
++++ b/tests/failure/test_prediction_failures.py
+@@ -1,43 +1,54 @@
+ """验证预测在数据、到期验证和快照版本异常时安全失败，不生成预测或交易。"""
+ 
+ from datetime import UTC, date, datetime, timedelta
+ from decimal import Decimal
+ 
+ import pytest
++from pydantic import ValidationError
+ 
+ from stock_agent.domain.market import InstrumentIdentity, Market
+ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
+ from stock_agent.domain.prediction import (
+     ActualOutcomeStatus,
+     CurrentPredictionUnavailableError,
+     ImmutablePredictionSnapshotError,
+     PredictionInput,
+     PredictionLabelRule,
+     PredictionLabelRuleError,
+     PredictionOutput,
+     PredictionSnapshotStore,
+     QuantitativeFactReference,
++    QuantitativeFieldEvidence,
++    quantitative_value_hash,
+     resolve_actual_outcome,
+ )
+ 
+-
+ 预测时点 = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
+ 证券 = InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="AAPL", currency="USD")
+ 标签规则 = PredictionLabelRule(
+     version_id="prediction-label-v1",
+     thresholds={1: Decimal("0.01"), 5: Decimal("0.03"), 20: Decimal("0.06")},
+ )
+ 交易日历 = TradingCalendar(
+     market="US",
+     version_id="calendar-us-v1",
+-    trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15), date(2026, 7, 16)}),
++    trading_days=frozenset(
++        {
++            date(2026, 7, 14),
++            date(2026, 7, 15),
++            date(2026, 7, 16),
++            date(2026, 7, 17),
++            date(2026, 7, 20),
++            date(2026, 7, 21),
++        }
++    ),
+ )
+ 
+ 
+ def 有效预测输入(**覆盖: object) -> PredictionInput:
+     """构造仅含预测时点已可审计事实的输入，供失败边界测试使用。"""
+ 
+     负载: dict[str, object] = {
+         "security_id": 证券,
+         "predicted_at": 预测时点,
+         "market_time": 预测时点,
+@@ -55,64 +66,75 @@ def 有效预测输入(**覆盖: object) -> PredictionInput:
+         "time_is_verifiable": True,
+         "is_current_data_available": True,
+     }
+     负载.update(覆盖)
+     return PredictionInput(**负载)
+ 
+ 
+ def 有效预测输出(**覆盖: object) -> PredictionOutput:
+     """构造可用于验证快照不可变性的最小合规输出。"""
+ 
+-    覆盖字段 = ("up_probability", "flat_probability", "down_probability", "confidence")
+     负载: dict[str, object] = {
+         "security_id": 证券,
+         "predicted_at": 预测时点,
+         "data_version": "daily-us-v1",
+         "feature_version": "features-v1",
+         "horizon_trading_days": 5,
+         "up_probability": 40.0,
+         "flat_probability": 35.0,
+         "down_probability": 25.0,
+         "confidence": 0.60,
+         "primary_evidence": ("本地已验证事实",),
+         "risk_factors": ("数据时效会影响研究结论",),
+         "freshness": "REALTIME",
+         "model_version": "baseline-v1",
++        "label_rule_version": "prediction-label-v1",
+         "disclaimer": "研究参考，不构成投资建议",
+-        "quantitative_fact_references": tuple(
+-            QuantitativeFactReference(
+-                reference_type="LOCAL",
+-                result_id=f"daily-us-v1:NASDAQ:AAPL:{字段}",
+-                source_id="local-verified-bars",
+-                security_id=证券,
+-                prediction_time=预测时点,
+-                data_version="daily-us-v1",
+-                model_version="baseline-v1",
+-                covered_fields=(字段,),
+-            )
+-            for 字段 in 覆盖字段
+-        ),
+     }
+     负载.update(覆盖)
++    量化字段 = ("up_probability", "flat_probability", "down_probability", "confidence")
++    负载["quantitative_fact_references"] = tuple(
++        QuantitativeFactReference(
++            reference_type="LOCAL",
++            result_id=f"{负载['data_version']}:NASDAQ:AAPL:{字段}",
++            source_id="local-verified-bars",
++            security_id=证券,
++            prediction_time=预测时点,
++            data_version=str(负载["data_version"]),
++            feature_version=str(负载["feature_version"]),
++            model_version=str(负载["model_version"]),
++            label_rule_version=str(负载["label_rule_version"]),
++            covered_fields=(字段,),
++            field_evidence=(
++                QuantitativeFieldEvidence(
++                    field_name=字段,
++                    numeric_value=Decimal(str(负载[字段])),
++                    value_hash=quantitative_value_hash(字段, Decimal(str(负载[字段]))),
++                    value_evidence="本地可复核事实",
++                ),
++            ),
++        )
++        for 字段 in 量化字段
++    )
+     return PredictionOutput(**负载)
+ 
+ 
+ def 有效到期结果(**覆盖: object):
+     """构造可独立追加的到期结果；其事实必须能追溯到预测快照。"""
+ 
+     验证时点 = 预测时点 + timedelta(days=1)
+     负载: dict[str, object] = {
+         "prediction_snapshot_id": "prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
+         "prediction_time": 预测时点,
+-        "horizon_trading_days": 1,
++        "horizon_trading_days": 5,
+         "reference_trading_day": date(2026, 7, 14),
+-        "expiry_trading_day": date(2026, 7, 15),
++        "expiry_trading_day": date(2026, 7, 21),
+         "trading_calendar": 交易日历,
+         "trading_calendar_version": "calendar-us-v1",
+         "snapshot_trading_calendar_version": "calendar-us-v1",
+         "calendar_available_at": 验证时点,
+         "reference_total_return_adjusted_price": Decimal("100"),
+         "expiry_total_return_adjusted_price": Decimal("101"),
+         "expiry_price_available_at": 验证时点,
+         "validated_at": 验证时点,
+         "prediction_label_rule": 标签规则,
+         "snapshot_label_rule_version": "prediction-label-v1",
+@@ -126,34 +148,42 @@ def 有效到期结果(**覆盖: object):
+ 
+ @pytest.mark.parametrize("新鲜度", ["DELAYED", "STALE", "CLOSED"])
+ def test_当前预测拒绝延迟过期或闭市行情并说明原因(新鲜度: str) -> None:
+     """不具备当前时效的行情不得进入预测，拒绝信息必须可向调用方说明。"""
+ 
+     with pytest.raises(CurrentPredictionUnavailableError, match="延迟|过期|闭市|当前预测"):
+         有效预测输入(freshness=新鲜度)
+ 
+ 
+ @pytest.mark.parametrize(
+-    ("字段", "值"),
++    ("字段", "值", "异常类型"),
+     [
+-        ("time_is_verifiable", False),
+-        ("source_id", None),
+-        ("market_time", None),
+-        ("collected_at", None),
+-        ("data_version", None),
+-        ("feature_version", None),
++        ("time_is_verifiable", False, ValidationError),
++        ("source_id", None, CurrentPredictionUnavailableError),
++        ("market_time", None, ValidationError),
++        ("collected_at", None, ValidationError),
++        ("data_version", None, ValidationError),
++        ("feature_version", None, ValidationError),
+     ],
+ )
+-def test_当前预测拒绝不可验证时点或缺少关键来源版本事实(字段: str, 值: object) -> None:
++def test_当前预测按输入类型拒绝不可验证时点或缺少关键来源版本事实(
++    字段: str, 值: object, 异常类型: type[ValueError]
++) -> None:
+     """来源、市场和采集时点、数据与特征版本任一缺失均必须有明确拒绝原因。"""
+ 
+-    with pytest.raises(CurrentPredictionUnavailableError, match="不可验证|来源|市场时间|采集时间|数据版本|特征版本"):
++    错误标识 = {
++        "market_time": "market_time",
++        "collected_at": "collected_at",
++        "data_version": "data_version",
++        "feature_version": "feature_version",
++    }.get(字段, "不可验证|来源")
++    with pytest.raises(异常类型, match=错误标识):
+         有效预测输入(**{字段: 值})
+ 
+ 
+ def test_历史快照在当前数据不可用时仍只读可展示() -> None:
+     """当前预测被阻断不应删除既有事实；历史记录只能以快照方式查看。"""
+ 
+     store = PredictionSnapshotStore()
+     snapshot = store.append(
+         snapshot_id="prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
+         prediction_input=有效预测输入(),
+@@ -261,34 +291,45 @@ def _公司行动(可得时点: datetime) -> CompanyAction:
+         effective_at=datetime(2026, 7, 15, 9, 30, tzinfo=UTC),
+         available_at=可得时点,
+         version_id="actions-us-v1",
+         source_id="authorized-source",
+     )
+ 
+ 
+ @pytest.mark.parametrize(
+     ("违规名称", "覆盖"),
+     [
+-        ("价格可得时点晚于验证边界", {"expiry_price_available_at": 预测时点 + timedelta(days=1, seconds=1)}),
++        (
++            "价格可得时点晚于验证边界",
++            {"expiry_price_available_at": 预测时点 + timedelta(days=1, seconds=1)},
++        ),
+         (
+             "公司行动可得时点晚于验证边界",
+             {"company_actions": (_公司行动(预测时点 + timedelta(days=1, seconds=1)),)},
+         ),
+-        ("交易日历可得时点晚于验证边界", {"calendar_available_at": 预测时点 + timedelta(days=1, seconds=1)}),
+-        ("标签规则可得时点晚于验证边界", {"label_rule_available_at": 预测时点 + timedelta(days=1, seconds=1)}),
++        (
++            "交易日历可得时点晚于验证边界",
++            {"calendar_available_at": 预测时点 + timedelta(days=1, seconds=1)},
++        ),
++        (
++            "标签规则可得时点晚于验证边界",
++            {"label_rule_available_at": 预测时点 + timedelta(days=1, seconds=1)},
++        ),
+         ("交易日历版本与快照不匹配", {"trading_calendar_version": "calendar-us-v2"}),
+         (
+             "标签规则版本与快照不匹配",
+             {
+                 "prediction_label_rule": PredictionLabelRule(
+                     version_id="prediction-label-v2",
+                     thresholds={1: Decimal("0.01"), 5: Decimal("0.03"), 20: Decimal("0.06")},
+                 )
+             },
+         ),
+     ],
+ )
+-def test_到期回填中每项晚到或版本不匹配均必须独立拒绝(违规名称: str, 覆盖: dict[str, object]) -> None:
++def test_到期回填中每项晚到或版本不匹配均必须独立拒绝(
++    违规名称: str, 覆盖: dict[str, object]
++) -> None:
+     """价格、行动、日历和规则均不能以晚到或错版事实回填历史预测。"""
+ 
+     with pytest.raises(PredictionLabelRuleError, match="可得时点|公司行动|日历版本|规则版本|回写"):
+         有效到期结果(**覆盖)
+diff --git a/tests/failure/test_prediction_security_regressions.py b/tests/failure/test_prediction_security_regressions.py
+new file mode 100644
+index 0000000..f993b28
+--- /dev/null
++++ b/tests/failure/test_prediction_security_regressions.py
+@@ -0,0 +1,187 @@
++"""覆盖 T050 独立审查发现的预测领域安全回归。"""
++
++from datetime import UTC, date, datetime, timedelta
++from decimal import Decimal
++
++import pytest
++from pydantic import ValidationError
++
++from stock_agent.domain.market import InstrumentIdentity, Market
++from stock_agent.domain.market_rules import TradingCalendar
++from stock_agent.domain.prediction import (
++    ActualOutcomeStatus,
++    PredictionInput,
++    PredictionLabelRule,
++    PredictionOutput,
++    PredictionSnapshotStore,
++    QuantitativeFactReference,
++    QuantitativeFieldEvidence,
++    quantitative_value_hash,
++    resolve_actual_outcome,
++)
++
++时间 = datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
++证券 = InstrumentIdentity(market=Market.US, exchange="NASDAQ", display_code="AAPL", currency="USD")
++日历 = TradingCalendar(
++    market="US",
++    version_id="calendar-us-v1",
++    trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15)}),
++)
++规则 = PredictionLabelRule(
++    version_id="label-v1", thresholds={1: Decimal("0.01"), 5: Decimal("0.03"), 20: Decimal("0.06")}
++)
++
++
++def _输入(**覆盖: object) -> PredictionInput:
++    负载: dict[str, object] = {
++        "security_id": 证券,
++        "predicted_at": 时间,
++        "market_time": 时间,
++        "collected_at": 时间,
++        "source_id": "local-bars",
++        "data_version": "daily-v1",
++        "feature_version": "feature-v1",
++        "trading_calendar_version": "calendar-us-v1",
++        "calendar_available_at": 时间,
++        "feature_available_at": 时间,
++        "feature_cutoff_at": 时间,
++        "model_version": "baseline-v1",
++        "prediction_label_rule_version": "label-v1",
++        "is_current_data_available": True,
++    }
++    负载.update(覆盖)
++    return PredictionInput(**负载)
++
++
++def _引用(field: str) -> QuantitativeFactReference:
++    value = {
++        "up_probability": "40",
++        "flat_probability": "35",
++        "down_probability": "25",
++        "confidence": "0.6",
++    }[field]
++    return QuantitativeFactReference(
++        reference_type="LOCAL",
++        result_id=f"fact-{field}",
++        source_id="local-bars",
++        security_id=证券,
++        prediction_time=时间,
++        data_version="daily-v1",
++        feature_version="feature-v1",
++        model_version="baseline-v1",
++        label_rule_version="label-v1",
++        covered_fields=(field,),
++        field_evidence=(
++            QuantitativeFieldEvidence(
++                field_name=field,
++                numeric_value=Decimal(value),
++                value_hash=quantitative_value_hash(field, Decimal(value)),
++                value_evidence="本地可复核事实",
++            ),
++        ),
++    )
++
++
++def _输出(**覆盖: object) -> PredictionOutput:
++    负载: dict[str, object] = {
++        "security_id": 证券,
++        "predicted_at": 时间,
++        "data_version": "daily-v1",
++        "feature_version": "feature-v1",
++        "horizon_trading_days": 1,
++        "up_probability": 40.0,
++        "flat_probability": 35.0,
++        "down_probability": 25.0,
++        "confidence": 0.6,
++        "primary_evidence": ("本地事实",),
++        "risk_factors": ("波动风险",),
++        "freshness": "REALTIME",
++        "model_version": "baseline-v1",
++        "label_rule_version": "label-v1",
++        "disclaimer": "研究参考，不构成投资建议",
++        "quantitative_fact_references": tuple(
++            _引用(field)
++            for field in ("up_probability", "flat_probability", "down_probability", "confidence")
++        ),
++    }
++    负载.update(覆盖)
++    return PredictionOutput(**负载)
++
++
++def test_事实引用拒绝覆盖字段单独声称数值证据() -> None:
++    with pytest.raises(ValidationError, match="数值|哈希|证据|引用"):
++        _输出(
++            quantitative_fact_references=tuple(
++                _引用(field).model_copy(update={"field_evidence": ()})
++                for field in (
++                    "up_probability",
++                    "flat_probability",
++                    "down_probability",
++                    "confidence",
++                )
++            )
++        )
++
++
++def test_事实引用拒绝特征版本不匹配() -> None:
++    with pytest.raises(ValidationError, match="特征版本|引用"):
++        _输出(
++            quantitative_fact_references=tuple(
++                _引用(field).model_copy(update={"feature_version": "feature-v2"})
++                for field in (
++                    "up_probability",
++                    "flat_probability",
++                    "down_probability",
++                    "confidence",
++                )
++            )
++        )
++
++
++def test_已有价格的非交易到期日保持待验证() -> None:
++    outcome = resolve_actual_outcome(
++        prediction_snapshot_id="snapshot-1",
++        prediction_time=时间,
++        horizon_trading_days=1,
++        reference_trading_day=date(2026, 7, 14),
++        expiry_trading_day=date(2026, 7, 16),
++        trading_calendar=日历,
++        trading_calendar_version="calendar-us-v1",
++        reference_total_return_adjusted_price=Decimal("100"),
++        expiry_total_return_adjusted_price=Decimal("101"),
++        expiry_price_available_at=时间 + timedelta(days=2),
++        validated_at=时间 + timedelta(days=2),
++        prediction_label_rule=规则,
++    )
++    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
++    assert outcome.label is None
++
++
++def test_快照追加对调用方嵌套对象防御拷贝() -> None:
++    store = PredictionSnapshotStore()
++    预测输入 = _输入()
++    预测输出 = _输出()
++    snapshot = store.append("snapshot-1", 预测输入, 预测输出)
++    预测输出.primary_evidence = ("被调用方修改",)
++    assert snapshot.prediction_output.primary_evidence == ("本地事实",)
++
++
++def test_结果追加拒绝非快照派生的预测时点() -> None:
++    store = PredictionSnapshotStore()
++    store.append("snapshot-1", _输入(), _输出())
++    outcome = resolve_actual_outcome(
++        prediction_snapshot_id="snapshot-1",
++        prediction_time=时间 + timedelta(seconds=1),
++        horizon_trading_days=1,
++        reference_trading_day=date(2026, 7, 14),
++        expiry_trading_day=date(2026, 7, 15),
++        trading_calendar=日历,
++        trading_calendar_version="calendar-us-v1",
++        reference_total_return_adjusted_price=Decimal("100"),
++        expiry_total_return_adjusted_price=Decimal("101"),
++        expiry_price_available_at=时间 + timedelta(days=1),
++        validated_at=时间 + timedelta(days=1),
++        prediction_label_rule=规则,
++    )
++    with pytest.raises(ValueError, match="预测时点|快照"):
++        store.append_actual_outcome(outcome)
+diff --git a/tests/property/test_prediction_labels.py b/tests/property/test_prediction_labels.py
+index a1303b7..4cb0b36 100644
+--- a/tests/property/test_prediction_labels.py
++++ b/tests/property/test_prediction_labels.py
+@@ -1,33 +1,33 @@
+ """验证预测标签、到期回填与概率展示的性质约束，不生成预测或交易。"""
+ 
+ from datetime import UTC, date, datetime, timedelta
+ from decimal import Decimal
+ from math import inf, nan
+ 
+ import pytest
+ from hypothesis import given
+ from hypothesis import strategies as st
+ from pydantic import ValidationError
++
++from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
+ from stock_agent.domain.prediction import (
+     ActualOutcomeStatus,
+     CurrentPredictionUnavailableError,
+     PredictionInput,
+     PredictionLabel,
+     PredictionLabelRule,
+     PredictionLabelRuleError,
+     resolve_actual_outcome,
+     validate_prediction_probabilities,
+ )
+ 
+-from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
+-
+ 允许周期 = (1, 5, 20)
+ 阈值 = {
+     1: Decimal("0.01"),
+     5: Decimal("0.03"),
+     20: Decimal("0.06"),
+ }
+ 规则_v1 = PredictionLabelRule(
+     version_id="prediction-label-v1",
+     thresholds=阈值,
+ )
+@@ -50,20 +50,26 @@ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
+     date(2026, 7, 21),
+     date(2026, 7, 22),
+     date(2026, 7, 23),
+     date(2026, 7, 24),
+     date(2026, 7, 27),
+     date(2026, 7, 28),
+     date(2026, 7, 29),
+     date(2026, 7, 30),
+     date(2026, 7, 31),
+     date(2026, 8, 3),
++    date(2026, 8, 4),
++    *(
++        date(2026, 8, 5) + timedelta(days=offset)
++        for offset in range(180)
++        if (date(2026, 8, 5) + timedelta(days=offset)).weekday() < 5
++    ),
+ )
+ 
+ 
+ def 市场日历(
+     交易日: tuple[date, ...] = 有效交易日, 版本: str = "calendar-us-v1"
+ ) -> TradingCalendar:
+     """构造带版本的市场日历事实，交易日只由显式市场事实决定。"""
+ 
+     return TradingCalendar(market="US", version_id=版本, trading_days=frozenset(交易日))
+ 
+@@ -76,20 +82,21 @@ def 到期交易日(周期: int, 日历: TradingCalendar) -> date:
+ 
+ 
+ def 预测输入负载(**覆盖: object) -> dict[str, object]:
+     """返回预测生成阶段可见的事实；该阶段不应包含到期结果。"""
+ 
+     负载: dict[str, object] = {
+         "security_id": "US:NASDAQ:AAPL",
+         "predicted_at": 预测时点,
+         "market_time": 预测时点,
+         "collected_at": 预测时点,
++        "source_id": "local-verified-bars",
+         "data_version": "daily-us-v1",
+         "feature_version": "features-v1",
+         "trading_calendar_version": "calendar-us-v1",
+         "calendar_available_at": 预测时点,
+         "feature_available_at": 预测时点,
+         "feature_cutoff_at": 预测时点,
+         "model_version": "baseline-v1",
+         "is_current_data_available": True,
+     }
+     负载.update(覆盖)
+@@ -117,21 +124,24 @@ def 到期结果(
+         horizon_trading_days=周期,
+         reference_trading_day=参考交易日,
+         expiry_trading_day=到期日,
+         trading_calendar=日历事实,
+         trading_calendar_version=传入日历版本 or 日历事实.version_id,
+         reference_total_return_adjusted_price=Decimal("100"),
+         expiry_total_return_adjusted_price=(
+             None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率)
+         ),
+         expiry_price_available_at=到期价格可得时点,
+-        validated_at=(到期价格可得时点 or 预测时点) + timedelta(seconds=1),
++        validated_at=max(
++            (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
++            datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
++        ),
+         prediction_label_rule=标签规则,
+     )
+ 
+ 
+ @pytest.mark.parametrize("周期", 允许周期)
+ @given(st.decimals(min_value="-0.50", max_value="0.50", places=4))
+ def test_到期实际结果按快照规则版本和包含边界分类(周期: int, 收益率: Decimal) -> None:
+     """到期结果以快照规则版本分类：达到正阈值上涨，达到负阈值下跌，其余震荡。"""
+ 
+     日历 = 市场日历()
+@@ -184,50 +194,63 @@ def test_周期按非连续市场交易日而非自然日计数(周期: int, 预
+     assert 预期到期日 != 参考交易日 + timedelta(days=周期)
+ 
+ 
+ @pytest.mark.parametrize("周期", 允许周期)
+ def test_实际结果解析器拒绝自然日到期日和错日历版本(周期: int) -> None:
+     """公开到期解析器必须自行校验市场交易日序号与日历版本，不能信任调用方。"""
+ 
+     日历 = 市场日历()
+     可得时点 = 预测时点 + timedelta(days=31)
+ 
+-    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
+-        到期结果(
++    自然日到期日 = 参考交易日 + timedelta(days=周期)
++    if not 日历.is_trading_day(自然日到期日):
++        自然日到期结果 = 到期结果(
+             周期=周期,
+             收益率=Decimal("0"),
+             日历=日历,
+             到期价格可得时点=可得时点,
+-            传入到期日=参考交易日 + timedelta(days=周期),
++            传入到期日=自然日到期日,
+         )
++        assert 自然日到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
++        assert 自然日到期结果.label is None
++    else:
++        with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
++            到期结果(
++                周期=周期,
++                收益率=Decimal("0"),
++                日历=日历,
++                到期价格可得时点=可得时点,
++                传入到期日=自然日到期日,
++            )
+ 
+     with pytest.raises(PredictionLabelRuleError, match="日历版本|日历"):
+         到期结果(
+             周期=周期,
+             收益率=Decimal("0"),
+             日历=日历,
+             到期价格可得时点=可得时点,
+             传入日历版本="calendar-us-v0",
+         )
+ 
+     错日历 = 市场日历(
+-        tuple(交易日 for 交易日 in 有效交易日 if 交易日 != date(2026, 7, 6)),
++        tuple(交易日 for 交易日 in 有效交易日 if 交易日 != 到期交易日(周期, 日历)),
+         版本="calendar-us-v2",
+     )
+-    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
+-        到期结果(
+-            周期=周期,
+-            收益率=Decimal("0"),
+-            日历=日历,
+-            解析日历=错日历,
+-            到期价格可得时点=可得时点,
+-        )
++    非交易日到期结果 = 到期结果(
++        周期=周期,
++        收益率=Decimal("0"),
++        日历=日历,
++        解析日历=错日历,
++        到期价格可得时点=可得时点,
++    )
++    assert 非交易日到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
++    assert 非交易日到期结果.label is None
+ 
+ 
+ @given(st.integers(min_value=-100, max_value=100).filter(lambda 周期: 周期 not in 允许周期))
+ def test_到期结果拒绝非规定交易日周期(周期: int) -> None:
+     """任意非 1、5、20 的周期不得被自然日或其他交易日周期替代。"""
+ 
+     with pytest.raises(PredictionLabelRuleError, match="交易日"):
+         到期结果(
+             周期=周期,
+             收益率=Decimal("0"),

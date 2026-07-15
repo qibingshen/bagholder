@@ -35,13 +35,13 @@ PyInstaller 或等效平台打包工具
 |------|------|---------------|
 | C-01 本地事实与元数据 | 通过 | `data-model.md` 数据集版本、批次、快照；`contracts/common.md` 溯源字段 |
 | C-02 无未来数据泄漏 | 通过 | `research.md` R-005；`contracts/backtests.md` 时间窗口与数据截点 |
-| C-03 大模型数字溯源 | 通过 | `contracts/mcp-tools.md` 工具结果引用；MCP 不生成或改写数字 |
+| C-03 大模型数字溯源 | 通过 | `contracts/mcp-tools.md` 工具结果引用、Skill 允许工具清单；MCP 不生成或改写数字 |
 | C-04 概率预测与提示 | 通过 | `contracts/predictions.md`；预测和报告固定风险提示 |
 | C-05 候选模型受控发布 | 通过 | `data-model.md` 模型状态机；`contracts/models.md` 发布与回滚门禁 |
 | C-06 不可变快照 | 通过 | `research.md` R-002；版本目录、清单、父版本引用 |
 | C-07 后台与界面隔离 | 通过 | `research.md` R-004；任务状态机和暂存提交协议 |
 | C-08 研究边界 | 通过 | `contracts/mcp-tools.md` 与 `contracts/common.md` 显式禁止券商和交易能力 |
-| C-09 契约、权限、日志、测试 | 通过 | `contracts/`；请求关联标识、参数校验、脱敏错误契约 |
+| C-09 契约、权限、日志、测试 | 通过 | `contracts/common.md` 分页/超时/资源限额/幂等/版本演进，`contracts/mcp-tools.md` 最小权限与 Skill 失败边界，任务中的先行契约与失败测试 |
 | C-10 三平台 | 通过 | `quickstart.md` 打包与验收矩阵；平台适配目录 |
 | C-11 简体中文 | 通过 | 本计划、契约、测试说明及代码注释规则；`AGENTS.md` |
 
