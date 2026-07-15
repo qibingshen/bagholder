@@ -57,6 +57,12 @@ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
     date(2026, 7, 30),
     date(2026, 7, 31),
     date(2026, 8, 3),
+    date(2026, 8, 4),
+    *(
+        date(2026, 8, 5) + timedelta(days=offset)
+        for offset in range(180)
+        if (date(2026, 8, 5) + timedelta(days=offset)).weekday() < 5
+    ),
 )
 
 
