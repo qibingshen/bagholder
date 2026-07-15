@@ -124,7 +124,7 @@ def 到期结果(
     日历事实 = 解析日历 or 日历
     到期价格可得时点 = max(
         到期价格可得时点 or 预测时点,
-        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC),
+        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC).replace(hour=12),
     )
     验证时点 = max(
         到期价格可得时点 + timedelta(seconds=1),

@@ -488,6 +488,7 @@ def _完整到期事实(
     *,
     snapshot_id: str,
     calendar: TradingCalendar = 日历,
+    security: InstrumentIdentity = 证券,
     reference_market_time: datetime = 时间,
     expiry_market_time: datetime = 时间 + timedelta(days=1),
     include_tradability: bool = True,
@@ -522,7 +523,7 @@ def _完整到期事实(
     return tuple(
         issue_local_outcome_fact(
             fact_type=fact_type,
-            security_id=证券,
+            security_id=security,
             prediction_snapshot_id=snapshot_id,
             prediction_time=时间,
             reference_type="LOCAL",
@@ -603,6 +604,60 @@ def test_到期日按证券市场本地日期判断而非_utc_日期() -> None:
     )
 
     assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
+
+
+@pytest.mark.parametrize(
+    ("security", "calendar", "价格可得时点", "到期事实时点", "预期状态"),
+    [
+        (
+            证券,
+            日历,
+            datetime(2026, 7, 15, 0, 30, tzinfo=UTC),
+            datetime(2026, 7, 15, 14, 0, tzinfo=UTC),
+            ActualOutcomeStatus.PENDING_VALIDATION,
+        ),
+        (
+            InstrumentIdentity(
+                market=Market.HK, exchange="HKEX", display_code="00700", currency="HKD"
+            ),
+            TradingCalendar(
+                market="HK",
+                version_id="calendar-hk-v1",
+                trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15)}),
+            ),
+            datetime(2026, 7, 14, 16, 30, tzinfo=UTC),
+            datetime(2026, 7, 14, 16, 30, tzinfo=UTC),
+            ActualOutcomeStatus.VALIDATED,
+        ),
+    ],
+)
+def test_到期价格可得性必须按证券市场日期判断(
+    security: InstrumentIdentity,
+    calendar: TradingCalendar,
+    价格可得时点: datetime,
+    到期事实时点: datetime,
+    预期状态: ActualOutcomeStatus,
+) -> None:
+    """UTC 日期与当地交易日不一致时，不得误判价格已经或尚未可得。"""
+
+    snapshot_id = f"snapshot-expiry-price-market-date-{security.market.value}"
+    outcome = _已验证到期结果(
+        snapshot_id=snapshot_id,
+        trading_calendar=calendar,
+        trading_calendar_version=calendar.version_id,
+        expiry_price_available_at=价格可得时点,
+        validated_at=datetime(2026, 7, 17, 0, 0, tzinfo=UTC),
+        security_id=security,
+        outcome_fact_references=_完整到期事实(
+            snapshot_id=snapshot_id,
+            calendar=calendar,
+            security=security,
+            expiry_market_time=到期事实时点,
+            validated_at=datetime(2026, 7, 17, 0, 0, tzinfo=UTC),
+        ),
+    )
+
+    assert outcome.status is 预期状态
 
 
 def test_缺少两端可交易状态事实的结果不得验证() -> None:

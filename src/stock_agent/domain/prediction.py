@@ -985,7 +985,8 @@ def resolve_actual_outcome(
         or expiry_price_available_at is None
         or _market_date(validated_at, security_id, trading_calendar.market) <= expiry_trading_day
         or expiry_price_available_at is not None
-        and expiry_price_available_at.date() < expiry_trading_day
+        and _market_date(expiry_price_available_at, security_id, trading_calendar.market)
+        < expiry_trading_day
         or any(
             reference.fact_type == "REFERENCE_PRICE"
             and (
