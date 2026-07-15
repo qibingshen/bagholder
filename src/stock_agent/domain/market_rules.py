@@ -44,6 +44,7 @@ class CompanyAction:
     effective_at: datetime
     version_id: str
     source_id: str
+    available_at: datetime | None = None
     adjustment_ratio: int | float | Decimal | None = None
     security_id: InstrumentIdentity | None = None
     market: Market | None = None
@@ -60,6 +61,10 @@ class CompanyAction:
             raise ValueError("公司行动必须包含标识、类型、来源和版本")
         if self.effective_at.tzinfo is None or self.effective_at.utcoffset() is None:
             raise ValueError("公司行动生效时间必须带时区")
+        if self.available_at is not None and (
+            self.available_at.tzinfo is None or self.available_at.utcoffset() is None
+        ):
+            raise ValueError("公司行动可得时间必须带时区")
         if self.adjustment_ratio is not None:
             ratio = self.adjustment_ratio
             if isinstance(ratio, Decimal):
