@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from stock_agent.domain.market import Market
 from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 
 FIXED_RESEARCH_DISCLAIMER = "研究参考，不构成投资建议"
@@ -379,6 +380,108 @@ def _market_date(value: datetime, security_id: object, fallback_market: str | No
     if not timezone:
         raise ValueError("到期事实必须绑定具有市场时区的证券")
     return value.astimezone(ZoneInfo(timezone)).date()
+
+
+def _rebuild_calendar_outcome_fact(
+    fact_value: str, *, expected_market: str, expected_version: str
+) -> TradingCalendar:
+    """将日历事实重建为领域对象，并拒绝重复、乱序或非规范编码。"""
+
+    payload = loads(fact_value)
+    if not isinstance(payload, dict) or set(payload) != {"market", "version_id", "trading_days"}:
+        raise ValueError("交易日历事实字段不完整")
+    raw_days = payload["trading_days"]
+    if not isinstance(raw_days, list) or not raw_days:
+        raise ValueError("交易日历事实必须包含交易日列表")
+    days = [date.fromisoformat(value) for value in raw_days]
+    if days != sorted(days) or len(days) != len(set(days)):
+        raise ValueError("交易日历事实不得重复或乱序")
+    calendar = TradingCalendar(
+        market=payload["market"], version_id=payload["version_id"], trading_days=frozenset(days)
+    )
+    if calendar.market != expected_market or calendar.version_id != expected_version:
+        raise ValueError("交易日历事实与快照不匹配")
+    if outcome_fact_value("TRADING_CALENDAR", calendar) != fact_value:
+        raise ValueError("交易日历事实不是规范编码")
+    return calendar
+
+
+def _rebuild_label_rule_outcome_fact(
+    fact_value: str, *, expected_version: str
+) -> PredictionLabelRule:
+    """将标签规则事实重建为领域对象，避免非完整或非正阈值绕过持久化。"""
+
+    payload = loads(fact_value)
+    if not isinstance(payload, dict) or set(payload) != {"version_id", "thresholds"}:
+        raise ValueError("标签规则事实字段不完整")
+    raw_thresholds = payload["thresholds"]
+    if not isinstance(raw_thresholds, dict):
+        raise ValueError("标签规则阈值必须为对象")
+    thresholds = {int(horizon): Decimal(value) for horizon, value in raw_thresholds.items()}
+    rule = PredictionLabelRule(version_id=payload["version_id"], thresholds=thresholds)
+    if not all(value.is_finite() and value > 0 for value in rule.thresholds.values()):
+        raise ValueError("标签规则阈值必须为有限正数")
+    if rule.version_id != expected_version:
+        raise ValueError("标签规则事实与快照不匹配")
+    if outcome_fact_value("LABEL_RULE", rule) != fact_value:
+        raise ValueError("标签规则事实不是规范编码")
+    return rule
+
+
+def _rebuild_company_actions_outcome_fact(
+    fact_value: str,
+    *,
+    security_id: object,
+    expected_market: str,
+) -> tuple[CompanyAction, ...]:
+    """以完整字段重建公司行动，禁止只凭自由 JSON 参与复权结果。"""
+
+    payload = loads(fact_value)
+    if not isinstance(payload, list):
+        raise ValueError("公司行动事实必须为列表")
+    actions = []
+    for raw_action in payload:
+        if not isinstance(raw_action, dict) or set(raw_action) != {
+            "action_id",
+            "action_type",
+            "effective_at",
+            "available_at",
+            "version_id",
+            "source_id",
+            "adjustment_ratio",
+            "security_id",
+            "market",
+        }:
+            raise ValueError("公司行动事实字段不完整")
+        if raw_action["security_id"] != str(security_id) or raw_action["market"] != expected_market:
+            raise ValueError("公司行动事实与证券或市场不匹配")
+        available_at = raw_action["available_at"]
+        action = CompanyAction(
+            action_id=raw_action["action_id"],
+            action_type=raw_action["action_type"],
+            effective_at=datetime.fromisoformat(raw_action["effective_at"]),
+            available_at=(
+                datetime.fromisoformat(available_at) if available_at is not None else None
+            ),
+            version_id=raw_action["version_id"],
+            source_id=raw_action["source_id"],
+            adjustment_ratio=(
+                Decimal(raw_action["adjustment_ratio"])
+                if raw_action["adjustment_ratio"] is not None
+                else None
+            ),
+            security_id=security_id,
+            market=Market(raw_action["market"]),
+        )
+        actions.append(action)
+    if [action.action_id for action in actions] != sorted(action.action_id for action in actions):
+        raise ValueError("公司行动事实必须按标识排序且不可重复")
+    if len({action.action_id for action in actions}) != len(actions):
+        raise ValueError("公司行动事实不得重复")
+    rebuilt = tuple(actions)
+    if outcome_fact_value("COMPANY_ACTIONS", rebuilt) != fact_value:
+        raise ValueError("公司行动事实不是规范编码")
+    return rebuilt
 
 
 class PredictionInput(BaseModel):
@@ -1094,19 +1197,32 @@ class PredictionSnapshotStore:
                 != outcome.expiry_trading_day
             ):
                 raise ValueError("到期价格事实市场日期不匹配")
-            calendar_data = loads(facts["TRADING_CALENDAR"].fact_value)
-            rule_data = loads(facts["LABEL_RULE"].fact_value)
-            actions_data = loads(facts["COMPANY_ACTIONS"].fact_value)
             market = getattr(security_id.market, "value", security_id.market)
             if (
-                calendar_data["market"] != market
-                or calendar_data["version_id"] != outcome.trading_calendar_version
-                or facts["TRADING_CALENDAR"].version_id != outcome.trading_calendar_version
-                or rule_data["version_id"] != outcome.label_rule_version
+                facts["TRADING_CALENDAR"].version_id != outcome.trading_calendar_version
                 or facts["LABEL_RULE"].version_id != outcome.label_rule_version
             ):
                 raise ValueError("日历或规则事实与快照不匹配")
-            trading_days = [date.fromisoformat(value) for value in calendar_data["trading_days"]]
+            calendar = _rebuild_calendar_outcome_fact(
+                facts["TRADING_CALENDAR"].fact_value,
+                expected_market=market,
+                expected_version=outcome.trading_calendar_version,
+            )
+            rule = _rebuild_label_rule_outcome_fact(
+                facts["LABEL_RULE"].fact_value, expected_version=outcome.label_rule_version
+            )
+            actions = _rebuild_company_actions_outcome_fact(
+                facts["COMPANY_ACTIONS"].fact_value,
+                security_id=security_id,
+                expected_market=market,
+            )
+            if any(
+                action.effective_at > outcome.validated_at
+                or (action.available_at is not None and action.available_at > outcome.validated_at)
+                for action in actions
+            ):
+                raise ValueError("公司行动事实在验证边界后才生效或可得")
+            trading_days = sorted(calendar.trading_days)
             if (
                 outcome.reference_trading_day not in trading_days
                 or outcome.expiry_trading_day not in trading_days
@@ -1114,18 +1230,7 @@ class PredictionSnapshotStore:
                 != trading_days.index(outcome.reference_trading_day) + outcome.horizon_trading_days
             ):
                 raise ValueError("交易日历不支持到期边界")
-            if not isinstance(actions_data, list) or any(
-                action["security_id"] != str(security_id)
-                or action["market"] != market
-                or datetime.fromisoformat(action["effective_at"]) > outcome.validated_at
-                or (
-                    action["available_at"] is not None
-                    and datetime.fromisoformat(action["available_at"]) > outcome.validated_at
-                )
-                for action in actions_data
-            ):
-                raise ValueError("公司行动事实与证券、市场或时点不匹配")
-            threshold = Decimal(rule_data["thresholds"][str(outcome.horizon_trading_days)])
+            threshold = rule.thresholds[outcome.horizon_trading_days]
             change = expiry_price / reference_price - Decimal("1")
             expected_label = (
                 PredictionLabel.UP

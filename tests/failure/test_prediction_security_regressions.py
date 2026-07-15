@@ -3,6 +3,7 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
+from json import dumps
 
 import pytest
 from pydantic import ValidationError
@@ -505,6 +506,89 @@ def test_仓储拒绝调用方伪造的已验证标签结果() -> None:
     forged = ActualOutcome(
         **{**outcome.__dict__, "status": ActualOutcomeStatus.VALIDATED, "label": "UP"}
     )
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def _替换已签名事实值(reference: object, *, fact_value: str) -> object:
+    """保持签名有效，以验证仓储必须重建并校验事实中的结构化领域对象。"""
+
+    payload = reference.model_dump(exclude={"issuer_id", "issuer_signature"})
+    payload["security_id"] = reference.security_id
+    return issue_local_outcome_fact(
+        **{
+            **payload,
+            "fact_value": fact_value,
+            "value_hash": sha256(f"{payload['fact_type']}:{fact_value}".encode()).hexdigest(),
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("fact_type", "fact_value"),
+    [
+        (
+            "TRADING_CALENDAR",
+            '{"market":"US","trading_days":["2026-07-14","2026-07-15","2026-07-15"],"version_id":"calendar-us-v1"}',
+        ),
+        (
+            "LABEL_RULE",
+            '{"thresholds":{"1":"0.01","5":"0.03","20":"0.06","99":"0.09"},"version_id":"label-v1"}',
+        ),
+    ],
+)
+def test_仓储拒绝已签名但不能重建为有效领域对象的归一化事实(
+    fact_type: str, fact_value: str
+) -> None:
+    """签名只证明来源，仓储仍须拒绝无效日历、规则和公司行动 JSON。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-normalization", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-normalization")
+    forged_facts = tuple(
+        _替换已签名事实值(reference, fact_value=fact_value)
+        if reference.fact_type == fact_type
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(**{**outcome.__dict__, "fact_references": forged_facts})
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def test_仓储拒绝已签名但复权比例非法的公司行动事实() -> None:
+    """公司行动必须完整重建，不能只校验证券和时点等少数字段。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-action-normalization", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-action-normalization")
+    invalid_actions = dumps(
+        [
+            {
+                "action_id": "split-invalid",
+                "action_type": "SPLIT",
+                "effective_at": 时间.isoformat(),
+                "available_at": None,
+                "version_id": "actions-v1",
+                "source_id": "local-history",
+                "adjustment_ratio": "0",
+                "security_id": str(证券),
+                "market": "US",
+            }
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    forged_facts = tuple(
+        _替换已签名事实值(reference, fact_value=invalid_actions)
+        if reference.fact_type == "COMPANY_ACTIONS"
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(**{**outcome.__dict__, "fact_references": forged_facts})
 
     with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
         store.append_actual_outcome(forged)
