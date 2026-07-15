@@ -71,15 +71,15 @@ def 标签(
 
 @pytest.mark.parametrize("周期", 允许周期)
 @given(st.decimals(min_value="-0.50", max_value="0.50", places=4))
-def test_总回报复权收益率在阈值外才分类为涨跌(周期: int, 收益率: Decimal) -> None:
-    """任意有限总回报收益率都必须按周期阈值，且仅在严格越界时归入涨跌。"""
+def test_总回报复权收益率按阈值分类为涨跌(周期: int, 收益率: Decimal) -> None:
+    """任意有限总回报收益率都必须按周期阈值，达到正阈值或负阈值即归入涨跌。"""
 
     日历 = 完整市场日历(周期)
     预期 = (
         PredictionLabel.UP
-        if 收益率 > 阈值[周期]
+        if 收益率 >= 阈值[周期]
         else PredictionLabel.DOWN
-        if 收益率 < -阈值[周期]
+        if 收益率 <= -阈值[周期]
         else PredictionLabel.FLAT
     )
 
@@ -87,13 +87,13 @@ def test_总回报复权收益率在阈值外才分类为涨跌(周期: int, 收
 
 
 @pytest.mark.parametrize("周期", 允许周期)
-def test_总回报收益率恰好处于正负阈值时归为震荡(周期: int) -> None:
-    """正负边界不因浮点或比较符号歧义被误判成上涨或下跌。"""
+def test_总回报收益率恰好处于正负阈值时归为涨跌(周期: int) -> None:
+    """正负边界不因浮点或比较符号歧义被误判成震荡。"""
 
     日历 = 完整市场日历(周期)
 
-    assert 标签(周期=周期, 收益率=阈值[周期], 日历=日历) is PredictionLabel.FLAT
-    assert 标签(周期=周期, 收益率=-阈值[周期], 日历=日历) is PredictionLabel.FLAT
+    assert 标签(周期=周期, 收益率=阈值[周期], 日历=日历) is PredictionLabel.UP
+    assert 标签(周期=周期, 收益率=-阈值[周期], 日历=日历) is PredictionLabel.DOWN
 
 
 @given(st.integers(min_value=-100, max_value=100).filter(lambda 周期: 周期 not in 允许周期))
