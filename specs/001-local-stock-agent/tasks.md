@@ -160,19 +160,19 @@
 
 ### 用户故事 5 测试（实现前必做）
 
-- [ ] T079 [P] [US5] 编写每日调度、报告和任务状态契约测试并确认先失败：`tests/contract/test_daily_report_contract.py`
-- [ ] T080 [P] [US5] 编写 A/HK/US 默认时点、休市、半日市和夏令时调度数据测试并确认先失败：`tests/property/test_market_scheduler.py`
-- [ ] T081 [P] [US5] 编写源失败、限频、取消、中断和部分报告失败场景测试并确认先失败：`tests/failure/test_daily_task_recovery.py`
+- [x] T079 [P] [US5] 编写每日调度、报告和任务状态契约测试并确认先失败：`tests/contract/test_daily_report_contract.py`
+- [x] T080 [P] [US5] 编写 A/HK/US 默认时点、休市、半日市和夏令时调度数据测试并确认先失败：`tests/property/test_market_scheduler.py`
+- [x] T081 [P] [US5] 编写源失败、限频、取消、中断和部分报告失败场景测试并确认先失败：`tests/failure/test_daily_task_recovery.py`
 
 ### 用户故事 5 实现
 
-- [ ] T082 [P] [US5] 实现按版本化市场日历和市场时区计算的每日调度器：`src/stock_agent/application/daily_scheduler.py`
-- [ ] T083 [US5] 实现行情更新、预测复盘、报告生成和通知工作者：`src/stock_agent/workers/daily_pipeline.py`
-- [ ] T084 [US5] 实现日报快照、缺失范围、降级影响和版本化存储：`src/stock_agent/application/report_service.py`
-- [ ] T085 [US5] 实现任务列表、重试、取消、恢复和通知视图模型：`src/stock_agent/desktop/viewmodels/task_view_model.py`
-- [ ] T086 [US5] 实现报告中心和任务中心的加载、离线、部分成功和恢复状态：`src/stock_agent/desktop/pages/report_page.py`、`src/stock_agent/desktop/pages/task_page.py`
-- [ ] T087 [US5] 编写每日任务与报告独立验收说明：`docs/acceptance/us5-daily-reports.md`
-- [ ] T088 [US5] 运行 US5 调度、契约、恢复和失败场景测试并记录结果：`tests/contract/test_daily_report_contract.py`、`tests/property/test_market_scheduler.py`、`tests/failure/test_daily_task_recovery.py`
+- [x] T082 [P] [US5] 实现按版本化市场日历和市场时区计算的每日调度器：`src/stock_agent/application/daily_scheduler.py`
+- [x] T083 [US5] 实现行情更新、预测复盘、报告生成和通知工作者：`src/stock_agent/workers/daily_pipeline.py`
+- [x] T084 [US5] 实现日报快照、缺失范围、降级影响和版本化存储：`src/stock_agent/application/report_service.py`
+- [x] T085 [US5] 实现任务列表、重试、取消、恢复和通知视图模型：`src/stock_agent/desktop/viewmodels/task_view_model.py`
+- [x] T086 [US5] 实现报告中心和任务中心的加载、离线、部分成功和恢复状态：`src/stock_agent/desktop/pages/report_page.py`、`src/stock_agent/desktop/pages/task_page.py`
+- [x] T087 [US5] 编写每日任务与报告独立验收说明：`docs/acceptance/us5-daily-reports.md`
+- [x] T088 [US5] 运行 US5 调度、契约、恢复和失败场景测试并记录结果：`tests/contract/test_daily_report_contract.py`、`tests/property/test_market_scheduler.py`、`tests/failure/test_daily_task_recovery.py`
 
 ## 阶段 8：用户故事 6——复盘历史预测与简单基准（P2）
 
@@ -182,18 +182,18 @@
 
 ### 用户故事 6 测试（实现前必做）
 
-- [ ] T089 [P] [US6] 编写回测窗口、成本、版本和结果契约测试并确认先失败：`tests/contract/test_backtest_contract.py`
-- [ ] T090 [P] [US6] 编写扩展/滚动窗口、标签隔离和无未来数据泄漏测试并确认先失败：`tests/property/test_time_series_backtest.py`
-- [ ] T091 [P] [US6] 编写手续费、滑点、停牌、涨跌停、流动性和不可成交失败场景测试并确认先失败：`tests/failure/test_backtest_trading_constraints.py`
+- [x] T089 [P] [US6] 编写回测窗口、成本、版本和结果契约测试并确认先失败：`tests/contract/test_backtest_contract.py`
+- [x] T090 [P] [US6] 编写扩展/滚动窗口、标签隔离和无未来数据泄漏测试并确认先失败：`tests/property/test_time_series_backtest.py`
+- [x] T091 [P] [US6] 编写手续费、滑点、停牌、涨跌停、流动性和不可成交失败场景测试并确认先失败：`tests/failure/test_backtest_trading_constraints.py`
 
 ### 用户故事 6 实现
 
-- [ ] T092 [P] [US6] 实现滚动和扩展窗口切分器及标签观察期隔离：`src/stock_agent/application/time_series_splitter.py`
-- [ ] T093 [US6] 实现版本化简单基准、概率指标和分市场/周期比较服务：`src/stock_agent/application/backtest_service.py`
-- [ ] T094 [US6] 实现交易摩擦、停牌和不可成交模拟规则：`src/stock_agent/domain/trading_constraints.py`
-- [ ] T095 [US6] 实现预测到期实际结果、历史快照和回测结果仓储：`src/stock_agent/adapters/storage/backtest_repository.py`
-- [ ] T096 [US6] 实现历史预测复盘、基准比较和待验证状态页面：`src/stock_agent/desktop/pages/history_review_page.py`
-- [ ] T097 [US6] 运行 US6 契约、时间序列和不可成交失败场景测试并记录结果：`tests/contract/test_backtest_contract.py`、`tests/property/test_time_series_backtest.py`、`tests/failure/test_backtest_trading_constraints.py`
+- [x] T092 [P] [US6] 实现滚动和扩展窗口切分器及标签观察期隔离：`src/stock_agent/application/time_series_splitter.py`
+- [x] T093 [US6] 实现版本化简单基准、概率指标和分市场/周期比较服务：`src/stock_agent/application/backtest_service.py`
+- [x] T094 [US6] 实现交易摩擦、停牌和不可成交模拟规则：`src/stock_agent/domain/trading_constraints.py`
+- [x] T095 [US6] 实现预测到期实际结果、历史快照和回测结果仓储：`src/stock_agent/adapters/storage/backtest_repository.py`
+- [x] T096 [US6] 实现历史预测复盘、基准比较和待验证状态页面：`src/stock_agent/desktop/pages/history_review_page.py`
+- [x] T097 [US6] 运行 US6 契约、时间序列和不可成交失败场景测试并记录结果：`tests/contract/test_backtest_contract.py`、`tests/property/test_time_series_backtest.py`、`tests/failure/test_backtest_trading_constraints.py`
 
 ## 阶段 9：用户故事 8——跨平台保存与恢复研究状态（P2）
 
@@ -203,18 +203,18 @@
 
 ### 用户故事 8 测试（实现前必做）
 
-- [ ] T098 [P] [US8] 编写备份清单、哈希、版本链和跨平台恢复契约测试并确认先失败：`tests/contract/test_backup_contract.py`
-- [ ] T099 [P] [US8] 编写 200 GB、80% 门禁、分钟线选择上限和路径适配数据测试并确认先失败：`tests/property/test_storage_budget.py`
-- [ ] T100 [P] [US8] 编写损坏包、中断恢复、凭据排除和不可变工件删除拒绝测试并确认先失败：`tests/failure/test_backup_recovery_failures.py`
+- [x] T098 [P] [US8] 编写备份清单、哈希、版本链和跨平台恢复契约测试并确认先失败：`tests/contract/test_backup_contract.py`
+- [x] T099 [P] [US8] 编写 200 GB、80% 门禁、分钟线选择上限和路径适配数据测试并确认先失败：`tests/property/test_storage_budget.py`
+- [x] T100 [P] [US8] 编写损坏包、中断恢复、凭据排除和不可变工件删除拒绝测试并确认先失败：`tests/failure/test_backup_recovery_failures.py`
 
 ### 用户故事 8 实现
 
-- [ ] T101 [P] [US8] 实现备份清单、一致性快照和哈希验证服务：`src/stock_agent/application/backup_service.py`
-- [ ] T102 [US8] 实现隔离恢复、只读校验和用户确认后的原子切换：`src/stock_agent/application/restore_service.py`
-- [ ] T103 [US8] 实现容量预算、80% 预警和分钟线选择限制服务：`src/stock_agent/application/storage_budget_service.py`
-- [ ] T104 [US8] 实现备份恢复、容量、导入导出和删除影响确认页面：`src/stock_agent/desktop/pages/data_management_page.py`
-- [ ] T105 [US8] 编写三平台恢复独立验收说明：`docs/acceptance/us8-backup-restore.md`
-- [ ] T106 [US8] 运行 US8 备份、容量和失败恢复测试并记录结果：`tests/contract/test_backup_contract.py`、`tests/property/test_storage_budget.py`、`tests/failure/test_backup_recovery_failures.py`
+- [x] T101 [P] [US8] 实现备份清单、一致性快照和哈希验证服务：`src/stock_agent/application/backup_service.py`
+- [x] T102 [US8] 实现隔离恢复、只读校验和用户确认后的原子切换：`src/stock_agent/application/restore_service.py`
+- [x] T103 [US8] 实现容量预算、80% 预警和分钟线选择限制服务：`src/stock_agent/application/storage_budget_service.py`
+- [x] T104 [US8] 实现备份恢复、容量、导入导出和删除影响确认页面：`src/stock_agent/desktop/pages/data_management_page.py`
+- [x] T105 [US8] 编写三平台恢复独立验收说明：`docs/acceptance/us8-backup-restore.md`
+- [x] T106 [US8] 运行 US8 备份、容量和失败恢复测试并记录结果：`tests/contract/test_backup_contract.py`、`tests/property/test_storage_budget.py`、`tests/failure/test_backup_recovery_failures.py`
 
 ## 阶段 10：用户故事 7——监督候选模型晋级（P3）
 
@@ -224,17 +224,17 @@
 
 ### 用户故事 7 测试（实现前必做）
 
-- [ ] T107 [P] [US7] 编写模型状态、评估证据、批准和回滚契约测试并确认先失败：`tests/contract/test_model_contract.py`
-- [ ] T108 [P] [US7] 编写 Brier score 5%、平衡准确率 2 个百分点、分市场/周期退化和 30 交易日影子数据测试并确认先失败：`tests/property/test_model_release_gates.py`
-- [ ] T109 [P] [US7] 编写严重故障、未来泄漏、未经授权发布、原子切换失败和回滚失败场景测试并确认先失败：`tests/failure/test_model_governance_failures.py`
+- [x] T107 [P] [US7] 编写模型状态、评估证据、批准和回滚契约测试并确认先失败：`tests/contract/test_model_contract.py`
+- [x] T108 [P] [US7] 编写 Brier score 5%、平衡准确率 2 个百分点、分市场/周期退化和 30 交易日影子数据测试并确认先失败：`tests/property/test_model_release_gates.py`
+- [x] T109 [P] [US7] 编写严重故障、未来泄漏、未经授权发布、原子切换失败和回滚失败场景测试并确认先失败：`tests/failure/test_model_governance_failures.py`
 
 ### 用户故事 7 实现
 
-- [ ] T110 [P] [US7] 实现候选模型注册、工件哈希和评估证据仓储：`src/stock_agent/adapters/storage/model_registry.py`
-- [ ] T111 [US7] 实现独立训练进程、候选登记和无发布权限边界：`src/stock_agent/training/runner.py`
-- [ ] T112 [US7] 实现时间序列评估、简单基准门禁和分组指标判定：`src/stock_agent/training/evaluation_pipeline.py`
-- [ ] T113 [US7] 实现候选与正式模型并行影子运行和 30 交易日证据累积：`src/stock_agent/training/shadow_runner.py`
-- [ ] T114 [US7] 实现本机桌面批准、原子发布指针和回滚审计用例：`src/stock_agent/application/model_release_service.py`
+- [x] T110 [P] [US7] 实现候选模型注册、工件哈希和评估证据仓储：`src/stock_agent/adapters/storage/model_registry.py`
+- [x] T111 [US7] 实现独立训练进程、候选登记和无发布权限边界：`src/stock_agent/training/runner.py`
+- [x] T112 [US7] 实现时间序列评估、简单基准门禁和分组指标判定：`src/stock_agent/training/evaluation_pipeline.py`
+- [x] T113 [US7] 实现候选与正式模型并行影子运行和 30 交易日证据累积：`src/stock_agent/training/shadow_runner.py`
+- [X] T114 [US7] 实现本机桌面批准、原子发布指针和回滚审计用例：`src/stock_agent/application/model_release_service.py`
 - [ ] T115 [US7] 实现模型中心、门禁证据、批准、发布和回滚确认页面：`src/stock_agent/desktop/pages/model_management_page.py`
 - [ ] T116 [US7] 实现 MCP 管理动作永久拒绝与服务端二次权限检查：`src/stock_agent/adapters/mcp/management_guard.py`
 - [ ] T117 [US7] 编写候选模型独立验收说明：`docs/acceptance/us7-model-governance.md`
