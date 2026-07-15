@@ -7,7 +7,10 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
+from hmac import compare_digest
+from hmac import new as hmac_new
 from json import dumps
+from secrets import token_bytes
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -177,6 +180,8 @@ class OutcomeFactReference(BaseModel):
     result_anchor: str
     fact_value: str
     value_hash: str
+    issuer_id: str = ""
+    issuer_signature: str = ""
 
     @model_validator(mode="after")
     def validate_outcome_fact(self) -> OutcomeFactReference:
@@ -212,6 +217,43 @@ class OutcomeFactReference(BaseModel):
         if self.value_hash != expected_hash:
             raise ValueError("到期事实值哈希不匹配")
         return self
+
+
+class LocalFactIssuer:
+    """签发本地审计事实，私钥不进入公共 DTO 或快照。"""
+
+    def __init__(self, issuer_id: str, secret: bytes | None = None) -> None:
+        if not issuer_id.strip():
+            raise ValueError("事实签发方标识不能为空")
+        self.issuer_id = issuer_id
+        self._secret = secret or token_bytes(32)
+
+    def signature_for(self, reference: OutcomeFactReference) -> str:
+        """以完整事实内容计算不可由 DTO 中公开字段重建的签名。"""
+        payload = reference.model_dump(exclude={"issuer_id", "issuer_signature"}, mode="json")
+        canonical = dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        return hmac_new(self._secret, canonical.encode(), sha256).hexdigest()
+
+    def issue(self, **payload: object) -> OutcomeFactReference:
+        """签发不可变的结构化事实引用。"""
+        unsigned = OutcomeFactReference(**payload, issuer_id=self.issuer_id)
+        return unsigned.model_copy(update={"issuer_signature": self.signature_for(unsigned)})
+
+    def verifies(self, reference: OutcomeFactReference) -> bool:
+        """只接受由当前受信本地签发方产生且未被改写的事实。"""
+        return (
+            reference.issuer_id == self.issuer_id
+            and bool(reference.issuer_signature)
+            and compare_digest(reference.issuer_signature, self.signature_for(reference))
+        )
+
+
+_DEFAULT_FACT_ISSUER = LocalFactIssuer("local-audit-service")
+
+
+def issue_local_outcome_fact(**payload: object) -> OutcomeFactReference:
+    """由内置本地审计服务签发离线事实；公共 DTO 自行构造默认不受信任。"""
+    return _DEFAULT_FACT_ISSUER.issue(**payload)
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -305,6 +347,7 @@ class PredictionInput(BaseModel):
     predicted_at: datetime
     market_time: datetime
     collected_at: datetime
+    available_at: datetime | None = None
     source_id: str | None = "UNSPECIFIED"
     data_version: str
     feature_version: str
@@ -380,6 +423,10 @@ class PredictionInput(BaseModel):
             _require_aware(value, name)
             if name != "预测时点" and value > self.predicted_at:
                 raise CurrentPredictionUnavailableError(f"{name}不得晚于预测时点")
+        available_at = self.available_at or self.collected_at
+        _require_aware(available_at, "可得时点")
+        if not self.market_time <= self.collected_at <= available_at <= self.predicted_at:
+            raise CurrentPredictionUnavailableError("市场、采集、可得与预测时点必须按顺序排列")
         if not self.is_current_data_available:
             raise CurrentPredictionUnavailableError("当前预测数据不可用")
         if not self.time_is_verifiable:
@@ -552,6 +599,7 @@ class ActualOutcome:
     status: ActualOutcomeStatus
     label: PredictionLabel | None
     label_rule_version: str
+    validated_at: datetime
     pending_reason: str | None = None
     fact_references: tuple[OutcomeFactReference, ...] = ()
 
@@ -585,6 +633,7 @@ def resolve_actual_outcome(
     outcome_fact_references: tuple[OutcomeFactReference, ...] = (),
     security_id: object | None = None,
     price_data_version: str | None = None,
+    fact_issuer: LocalFactIssuer | None = None,
 ) -> ActualOutcome:
     """独立解析到期事实；缺价或无效到期日仅形成待验证结果。"""
     for name, value in (("预测时点", prediction_time), ("验证时点", validated_at)):
@@ -595,12 +644,36 @@ def resolve_actual_outcome(
         snapshot_trading_calendar_version
         and trading_calendar_version != snapshot_trading_calendar_version
     ):
-        raise PredictionLabelRuleError("日历版本不匹配，禁止回写")
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "日历版本不匹配",
+        )
     if (
         snapshot_label_rule_version
         and prediction_label_rule.version_id != snapshot_label_rule_version
     ):
-        raise PredictionLabelRuleError("规则版本不匹配，禁止回写")
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "规则版本不匹配",
+        )
     for value, name in (
         (expiry_price_available_at, "价格可得时点"),
         (calendar_available_at, "日历可得时点"),
@@ -608,20 +681,43 @@ def resolve_actual_outcome(
         (company_actions_available_at, "公司行动可得时点"),
     ):
         if value is not None and value > validated_at:
-            raise PredictionLabelRuleError(f"{name}晚于验证边界")
+            return _pending_outcome(
+                prediction_snapshot_id,
+                prediction_time,
+                horizon_trading_days,
+                reference_trading_day,
+                expiry_trading_day,
+                trading_calendar_version,
+                reference_total_return_adjusted_price,
+                expiry_total_return_adjusted_price,
+                prediction_label_rule.version_id,
+                validated_at,
+                pending_reason or f"{name}晚于验证边界",
+            )
     if any(
         action.available_at is not None and action.available_at > validated_at
         for action in company_actions
     ):
-        raise PredictionLabelRuleError("公司行动可得时点晚于验证边界")
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "公司行动可得时点晚于验证边界",
+        )
     required_fact_types = {
         "REFERENCE_PRICE",
         "EXPIRY_PRICE",
         "TRADING_CALENDAR",
         "LABEL_RULE",
     }
-    if company_actions:
-        required_fact_types.add("COMPANY_ACTIONS")
+    required_fact_types.add("COMPANY_ACTIONS")
     provided_fact_types = {reference.fact_type for reference in outcome_fact_references}
     facts_by_type = {reference.fact_type: reference for reference in outcome_fact_references}
     facts_are_bound = (
@@ -633,6 +729,10 @@ def resolve_actual_outcome(
             and reference.prediction_snapshot_id == prediction_snapshot_id
             and reference.prediction_time == prediction_time
             and reference.available_at <= validated_at
+            for reference in outcome_fact_references
+        )
+        and all(
+            (fact_issuer or _DEFAULT_FACT_ISSUER).verifies(reference)
             for reference in outcome_fact_references
         )
         and facts_by_type.get("REFERENCE_PRICE") is not None
@@ -652,14 +752,9 @@ def resolve_actual_outcome(
         and facts_by_type["LABEL_RULE"].version_id == prediction_label_rule.version_id
         and facts_by_type["LABEL_RULE"].fact_value
         == outcome_fact_value("LABEL_RULE", prediction_label_rule)
-        and (
-            not company_actions
-            or (
-                facts_by_type.get("COMPANY_ACTIONS") is not None
-                and facts_by_type["COMPANY_ACTIONS"].fact_value
-                == outcome_fact_value("COMPANY_ACTIONS", company_actions)
-            )
-        )
+        and facts_by_type.get("COMPANY_ACTIONS") is not None
+        and facts_by_type["COMPANY_ACTIONS"].fact_value
+        == outcome_fact_value("COMPANY_ACTIONS", company_actions)
     )
     if (
         not trading_calendar.is_trading_day(expiry_trading_day)
@@ -667,6 +762,20 @@ def resolve_actual_outcome(
         or expiry_total_return_adjusted_price is None
         or expiry_price_available_at is None
         or validated_at.date() <= expiry_trading_day
+        or expiry_price_available_at is not None
+        and expiry_price_available_at.date() < expiry_trading_day
+        or any(
+            reference.fact_type == "REFERENCE_PRICE"
+            and (
+                reference.market_time > prediction_time or reference.available_at > prediction_time
+            )
+            for reference in outcome_fact_references
+        )
+        or any(
+            reference.fact_type == "EXPIRY_PRICE"
+            and reference.market_time.date() < expiry_trading_day
+            for reference in outcome_fact_references
+        )
         or not required_fact_types.issubset(provided_fact_types)
         or not facts_are_bound
         or not reference_total_return_adjusted_price.is_finite()
@@ -679,7 +788,7 @@ def resolve_actual_outcome(
             )
         )
     ):
-        return ActualOutcome(
+        return _pending_outcome(
             prediction_snapshot_id,
             prediction_time,
             horizon_trading_days,
@@ -688,15 +797,25 @@ def resolve_actual_outcome(
             trading_calendar_version,
             reference_total_return_adjusted_price,
             expiry_total_return_adjusted_price,
-            ActualOutcomeStatus.PENDING_VALIDATION,
-            None,
             prediction_label_rule.version_id,
+            validated_at,
             pending_reason,
-            (),
         )
     days = sorted(trading_calendar.trading_days)
     if days.index(expiry_trading_day) != days.index(reference_trading_day) + horizon_trading_days:
-        raise PredictionLabelRuleError("到期日必须按市场有效交易日计算")
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "到期日不符合市场交易日历",
+        )
     change = expiry_total_return_adjusted_price / reference_total_return_adjusted_price - Decimal(
         "1"
     )
@@ -720,8 +839,41 @@ def resolve_actual_outcome(
         ActualOutcomeStatus.VALIDATED,
         label,
         prediction_label_rule.version_id,
+        validated_at,
         None,
         tuple(outcome_fact_references),
+    )
+
+
+def _pending_outcome(
+    prediction_snapshot_id: str,
+    prediction_time: datetime,
+    horizon_trading_days: int,
+    reference_trading_day: date,
+    expiry_trading_day: date,
+    trading_calendar_version: str,
+    reference_price: Decimal,
+    expiry_price: Decimal | None,
+    label_rule_version: str,
+    validated_at: datetime,
+    pending_reason: str | None,
+) -> ActualOutcome:
+    """任何不可验证、不成交或链路不完整的情况只形成不可持久化的待验证结果。"""
+    return ActualOutcome(
+        prediction_snapshot_id,
+        prediction_time,
+        horizon_trading_days,
+        reference_trading_day,
+        expiry_trading_day,
+        trading_calendar_version,
+        reference_price,
+        expiry_price,
+        ActualOutcomeStatus.PENDING_VALIDATION,
+        None,
+        label_rule_version,
+        validated_at,
+        pending_reason,
+        (),
     )
 
 

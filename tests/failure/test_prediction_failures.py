@@ -13,14 +13,13 @@ from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
     CurrentPredictionUnavailableError,
     ImmutablePredictionSnapshotError,
-    OutcomeFactReference,
     PredictionInput,
     PredictionLabelRule,
-    PredictionLabelRuleError,
     PredictionOutput,
     PredictionSnapshotStore,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
+    issue_local_outcome_fact,
     outcome_fact_value,
     quantitative_value_hash,
     resolve_actual_outcome,
@@ -159,16 +158,18 @@ def 有效到期结果(**覆盖: object):
         "EXPIRY_PRICE": 负载["expiry_total_return_adjusted_price"],
         "TRADING_CALENDAR": 负载["trading_calendar"],
         "LABEL_RULE": 负载["prediction_label_rule"],
+        "COMPANY_ACTIONS": tuple(负载["company_actions"]),
     }
     到期事实版本 = {
         "REFERENCE_PRICE": "daily-us-v1",
         "EXPIRY_PRICE": "daily-us-v1",
         "TRADING_CALENDAR": 负载["trading_calendar_version"],
         "LABEL_RULE": 负载["prediction_label_rule"].version_id,
+        "COMPANY_ACTIONS": "company-actions-v1",
     }
     if all(value is not None for value in 到期事实值.values()):
         负载["outcome_fact_references"] = tuple(
-            OutcomeFactReference(
+            issue_local_outcome_fact(
                 fact_type=事实类型,
                 security_id=证券,
                 prediction_snapshot_id=str(负载["prediction_snapshot_id"]),
@@ -177,9 +178,9 @@ def 有效到期结果(**覆盖: object):
                 source_id="local-verified-history",
                 tool_name="local_fact_store",
                 tool_version="v1",
-                market_time=验证时点,
-                collected_at=验证时点,
-                available_at=验证时点,
+                market_time=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+                collected_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+                available_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
                 version_id=str(到期事实版本[事实类型]),
                 result_id=f"{事实类型}:{到期事实版本[事实类型]}",
                 result_anchor=f"local://outcomes/{事实类型}:{到期事实版本[事实类型]}",
@@ -188,7 +189,13 @@ def 有效到期结果(**覆盖: object):
                     f"{事实类型}:{outcome_fact_value(事实类型, 到期事实值[事实类型])}".encode()
                 ).hexdigest(),
             )
-            for 事实类型 in ("REFERENCE_PRICE", "EXPIRY_PRICE", "TRADING_CALENDAR", "LABEL_RULE")
+            for 事实类型 in (
+                "REFERENCE_PRICE",
+                "EXPIRY_PRICE",
+                "TRADING_CALENDAR",
+                "LABEL_RULE",
+                "COMPANY_ACTIONS",
+            )
         )
         负载["security_id"] = 证券
         负载["price_data_version"] = "daily-us-v1"
@@ -380,5 +387,4 @@ def test_到期回填中每项晚到或版本不匹配均必须独立拒绝(
 ) -> None:
     """价格、行动、日历和规则均不能以晚到或错版事实回填历史预测。"""
 
-    with pytest.raises(PredictionLabelRuleError, match="可得时点|公司行动|日历版本|规则版本|回写"):
-        有效到期结果(**覆盖)
+    assert 有效到期结果(**覆盖).status is ActualOutcomeStatus.PENDING_VALIDATION

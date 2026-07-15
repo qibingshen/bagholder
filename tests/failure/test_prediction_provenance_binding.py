@@ -15,6 +15,7 @@ from stock_agent.domain.prediction import (
     PredictionLabelRule,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
+    issue_local_outcome_fact,
     quantitative_value_hash,
     resolve_actual_outcome,
 )
@@ -32,7 +33,7 @@ from stock_agent.domain.prediction import (
 
 
 def _到期事实(事实类型: str, 值: str, 验证时点: datetime) -> OutcomeFactReference:
-    return OutcomeFactReference(
+    return issue_local_outcome_fact(
         fact_type=事实类型,
         security_id=证券,
         prediction_snapshot_id="snapshot-1",

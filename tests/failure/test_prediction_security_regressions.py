@@ -11,13 +11,13 @@ from stock_agent.domain.market import InstrumentIdentity, Market
 from stock_agent.domain.market_rules import TradingCalendar
 from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
-    OutcomeFactReference,
     PredictionInput,
     PredictionLabelRule,
     PredictionOutput,
     PredictionSnapshotStore,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
+    issue_local_outcome_fact,
     outcome_fact_value,
     quantitative_value_hash,
     resolve_actual_outcome,
@@ -197,15 +197,17 @@ def test_到期结果保存完整的结构化事实引用() -> None:
         "EXPIRY_PRICE": Decimal("101"),
         "TRADING_CALENDAR": 日历,
         "LABEL_RULE": 规则,
+        "COMPANY_ACTIONS": (),
     }
     versions = {
         "REFERENCE_PRICE": "daily-v1",
         "EXPIRY_PRICE": "daily-v1",
         "TRADING_CALENDAR": "calendar-us-v1",
         "LABEL_RULE": "label-v1",
+        "COMPANY_ACTIONS": "company-actions-v1",
     }
     facts = tuple(
-        OutcomeFactReference(
+        issue_local_outcome_fact(
             fact_type=fact_type,
             security_id=证券,
             prediction_snapshot_id="snapshot-facts",
@@ -214,9 +216,9 @@ def test_到期结果保存完整的结构化事实引用() -> None:
             source_id="local-history",
             tool_name="local_fact_store",
             tool_version="v1",
-            market_time=validated_at,
-            collected_at=validated_at,
-            available_at=validated_at,
+            market_time=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
+            collected_at=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
+            available_at=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
             version_id=versions[fact_type],
             result_id=f"result-{fact_type}",
             result_anchor=f"local://outcomes/result-{fact_type}",
@@ -225,7 +227,13 @@ def test_到期结果保存完整的结构化事实引用() -> None:
                 f"{fact_type}:{outcome_fact_value(fact_type, values[fact_type])}".encode()
             ).hexdigest(),
         )
-        for fact_type in ("REFERENCE_PRICE", "EXPIRY_PRICE", "TRADING_CALENDAR", "LABEL_RULE")
+        for fact_type in (
+            "REFERENCE_PRICE",
+            "EXPIRY_PRICE",
+            "TRADING_CALENDAR",
+            "LABEL_RULE",
+            "COMPANY_ACTIONS",
+        )
     )
     outcome = resolve_actual_outcome(
         prediction_snapshot_id="snapshot-facts",

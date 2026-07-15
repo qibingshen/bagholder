@@ -14,11 +14,11 @@ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
     CurrentPredictionUnavailableError,
-    OutcomeFactReference,
     PredictionInput,
     PredictionLabel,
     PredictionLabelRule,
     PredictionLabelRuleError,
+    issue_local_outcome_fact,
     outcome_fact_value,
     resolve_actual_outcome,
     validate_prediction_probabilities,
@@ -121,8 +121,12 @@ def 到期结果(
 
     到期日 = 传入到期日 or 到期交易日(周期, 日历)
     日历事实 = 解析日历 or 日历
+    到期价格可得时点 = max(
+        到期价格可得时点 or 预测时点,
+        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC),
+    )
     验证时点 = max(
-        (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
+        到期价格可得时点 + timedelta(seconds=1),
         datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
     )
     到期事实值 = (
@@ -134,9 +138,10 @@ def 到期结果(
         ),
         ("TRADING_CALENDAR", 日历事实.version_id, 日历事实),
         ("LABEL_RULE", 标签规则.version_id, 标签规则),
+        ("COMPANY_ACTIONS", "company-actions-v1", ()),
     )
     到期事实 = tuple(
-        OutcomeFactReference(
+        issue_local_outcome_fact(
             fact_type=事实类型,
             security_id="US:NASDAQ:AAPL",
             prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
@@ -145,9 +150,9 @@ def 到期结果(
             source_id="local-verified-history",
             tool_name="local_fact_store",
             tool_version="v1",
-            market_time=验证时点,
-            collected_at=验证时点,
-            available_at=验证时点,
+            market_time=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+            collected_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+            available_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
             version_id=版本,
             result_id=f"{事实类型}:{版本}",
             result_anchor=f"local://outcomes/{事实类型}:{版本}",
@@ -254,23 +259,25 @@ def test_实际结果解析器拒绝自然日到期日和错日历版本(周期:
         assert 自然日到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
         assert 自然日到期结果.label is None
     else:
-        with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
-            到期结果(
-                周期=周期,
-                收益率=Decimal("0"),
-                日历=日历,
-                到期价格可得时点=可得时点,
-                传入到期日=自然日到期日,
-            )
+        错序到期结果 = 到期结果(
+            周期=周期,
+            收益率=Decimal("0"),
+            日历=日历,
+            到期价格可得时点=可得时点,
+            传入到期日=自然日到期日,
+        )
+        assert 错序到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
 
-    with pytest.raises(PredictionLabelRuleError, match="日历版本|日历"):
+    assert (
         到期结果(
             周期=周期,
             收益率=Decimal("0"),
             日历=日历,
             到期价格可得时点=可得时点,
             传入日历版本="calendar-us-v0",
-        )
+        ).status
+        is ActualOutcomeStatus.PENDING_VALIDATION
+    )
 
     错日历 = 市场日历(
         tuple(交易日 for 交易日 in 有效交易日 if 交易日 != 到期交易日(周期, 日历)),
