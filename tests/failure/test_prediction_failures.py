@@ -156,6 +156,8 @@ def 有效到期结果(**覆盖: object):
     到期事实值 = {
         "REFERENCE_PRICE": 负载["reference_total_return_adjusted_price"],
         "EXPIRY_PRICE": 负载["expiry_total_return_adjusted_price"],
+        "REFERENCE_TRADABILITY": "TRADABLE",
+        "EXPIRY_TRADABILITY": "TRADABLE",
         "TRADING_CALENDAR": 负载["trading_calendar"],
         "LABEL_RULE": 负载["prediction_label_rule"],
         "COMPANY_ACTIONS": tuple(负载["company_actions"]),
@@ -163,6 +165,8 @@ def 有效到期结果(**覆盖: object):
     到期事实版本 = {
         "REFERENCE_PRICE": "daily-us-v1",
         "EXPIRY_PRICE": "daily-us-v1",
+        "REFERENCE_TRADABILITY": "daily-us-v1",
+        "EXPIRY_TRADABILITY": "daily-us-v1",
         "TRADING_CALENDAR": 负载["trading_calendar_version"],
         "LABEL_RULE": 负载["prediction_label_rule"].version_id,
         "COMPANY_ACTIONS": "company-actions-v1",
@@ -178,9 +182,33 @@ def 有效到期结果(**覆盖: object):
                 source_id="local-verified-history",
                 tool_name="local_fact_store",
                 tool_version="v1",
-                market_time=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
-                collected_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
-                available_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+                market_time=(
+                    预测时点
+                    if 事实类型 == "REFERENCE_PRICE"
+                    else datetime.combine(
+                        负载["expiry_trading_day"], datetime.min.time(), tzinfo=UTC
+                    ).replace(hour=12)
+                    if 事实类型 == "EXPIRY_PRICE"
+                    else 验证时点
+                ),
+                collected_at=(
+                    预测时点
+                    if 事实类型 == "REFERENCE_PRICE"
+                    else datetime.combine(
+                        负载["expiry_trading_day"], datetime.min.time(), tzinfo=UTC
+                    ).replace(hour=12)
+                    if 事实类型 == "EXPIRY_PRICE"
+                    else 验证时点
+                ),
+                available_at=(
+                    预测时点
+                    if 事实类型 == "REFERENCE_PRICE"
+                    else datetime.combine(
+                        负载["expiry_trading_day"], datetime.min.time(), tzinfo=UTC
+                    ).replace(hour=12)
+                    if 事实类型 == "EXPIRY_PRICE"
+                    else 验证时点
+                ),
                 version_id=str(到期事实版本[事实类型]),
                 result_id=f"{事实类型}:{到期事实版本[事实类型]}",
                 result_anchor=f"local://outcomes/{事实类型}:{到期事实版本[事实类型]}",
@@ -192,6 +220,8 @@ def 有效到期结果(**覆盖: object):
             for 事实类型 in (
                 "REFERENCE_PRICE",
                 "EXPIRY_PRICE",
+                "REFERENCE_TRADABILITY",
+                "EXPIRY_TRADABILITY",
                 "TRADING_CALENDAR",
                 "LABEL_RULE",
                 "COMPANY_ACTIONS",

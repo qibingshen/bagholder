@@ -10,7 +10,10 @@ from pydantic import ValidationError
 from stock_agent.domain.market import InstrumentIdentity, Market
 from stock_agent.domain.market_rules import TradingCalendar
 from stock_agent.domain.prediction import (
+    ActualOutcome,
     ActualOutcomeStatus,
+    ImmutablePredictionSnapshotError,
+    LocalFactIssuer,
     PredictionInput,
     PredictionLabelRule,
     PredictionOutput,
@@ -195,6 +198,8 @@ def test_到期结果保存完整的结构化事实引用() -> None:
     values = {
         "REFERENCE_PRICE": Decimal("100"),
         "EXPIRY_PRICE": Decimal("101"),
+        "REFERENCE_TRADABILITY": "TRADABLE",
+        "EXPIRY_TRADABILITY": "TRADABLE",
         "TRADING_CALENDAR": 日历,
         "LABEL_RULE": 规则,
         "COMPANY_ACTIONS": (),
@@ -202,6 +207,8 @@ def test_到期结果保存完整的结构化事实引用() -> None:
     versions = {
         "REFERENCE_PRICE": "daily-v1",
         "EXPIRY_PRICE": "daily-v1",
+        "REFERENCE_TRADABILITY": "daily-v1",
+        "EXPIRY_TRADABILITY": "daily-v1",
         "TRADING_CALENDAR": "calendar-us-v1",
         "LABEL_RULE": "label-v1",
         "COMPANY_ACTIONS": "company-actions-v1",
@@ -216,9 +223,27 @@ def test_到期结果保存完整的结构化事实引用() -> None:
             source_id="local-history",
             tool_name="local_fact_store",
             tool_version="v1",
-            market_time=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
-            collected_at=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
-            available_at=时间 if fact_type == "REFERENCE_PRICE" else validated_at,
+            market_time=(
+                时间
+                if fact_type == "REFERENCE_PRICE"
+                else 时间 + timedelta(days=1)
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
+            collected_at=(
+                时间
+                if fact_type == "REFERENCE_PRICE"
+                else 时间 + timedelta(days=1)
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
+            available_at=(
+                时间
+                if fact_type == "REFERENCE_PRICE"
+                else 时间 + timedelta(days=1)
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
             version_id=versions[fact_type],
             result_id=f"result-{fact_type}",
             result_anchor=f"local://outcomes/result-{fact_type}",
@@ -230,6 +255,8 @@ def test_到期结果保存完整的结构化事实引用() -> None:
         for fact_type in (
             "REFERENCE_PRICE",
             "EXPIRY_PRICE",
+            "REFERENCE_TRADABILITY",
+            "EXPIRY_TRADABILITY",
             "TRADING_CALENDAR",
             "LABEL_RULE",
             "COMPANY_ACTIONS",
@@ -353,3 +380,165 @@ def test_非正到期价格保持待验证而不参与除法(
         prediction_label_rule=规则,
     )
     assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
+
+
+def _完整到期事实(
+    *,
+    snapshot_id: str,
+    calendar: TradingCalendar = 日历,
+    reference_market_time: datetime = 时间,
+    expiry_market_time: datetime = 时间 + timedelta(days=1),
+    include_tradability: bool = True,
+) -> tuple[object, ...]:
+    """构造由内置本地审计服务签发的最小完整到期事实。"""
+
+    validated_at = 时间 + timedelta(days=2)
+    values = {
+        "REFERENCE_PRICE": Decimal("100"),
+        "EXPIRY_PRICE": Decimal("101"),
+        "TRADING_CALENDAR": calendar,
+        "LABEL_RULE": 规则,
+        "COMPANY_ACTIONS": (),
+    }
+    if include_tradability:
+        values.update(
+            {
+                "REFERENCE_TRADABILITY": "TRADABLE",
+                "EXPIRY_TRADABILITY": "TRADABLE",
+            }
+        )
+    versions = {
+        "REFERENCE_PRICE": "daily-v1",
+        "EXPIRY_PRICE": "daily-v1",
+        "TRADING_CALENDAR": calendar.version_id,
+        "LABEL_RULE": "label-v1",
+        "COMPANY_ACTIONS": "company-actions-v1",
+        "REFERENCE_TRADABILITY": "daily-v1",
+        "EXPIRY_TRADABILITY": "daily-v1",
+    }
+    return tuple(
+        issue_local_outcome_fact(
+            fact_type=fact_type,
+            security_id=证券,
+            prediction_snapshot_id=snapshot_id,
+            prediction_time=时间,
+            reference_type="LOCAL",
+            source_id="local-history",
+            tool_name="local_fact_store",
+            tool_version="v1",
+            market_time=(
+                reference_market_time
+                if fact_type == "REFERENCE_PRICE"
+                else expiry_market_time
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
+            collected_at=(
+                reference_market_time
+                if fact_type == "REFERENCE_PRICE"
+                else expiry_market_time
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
+            available_at=(
+                reference_market_time
+                if fact_type == "REFERENCE_PRICE"
+                else expiry_market_time
+                if fact_type == "EXPIRY_PRICE"
+                else validated_at
+            ),
+            version_id=versions[fact_type],
+            result_id=f"result-{fact_type}",
+            result_anchor=f"local://outcomes/result-{fact_type}",
+            fact_value=outcome_fact_value(fact_type, values[fact_type]),
+            value_hash=sha256(
+                f"{fact_type}:{outcome_fact_value(fact_type, values[fact_type])}".encode()
+            ).hexdigest(),
+        )
+        for fact_type in values
+    )
+
+
+def _已验证到期结果(*, snapshot_id: str, **overrides: object) -> ActualOutcome:
+    """解析用于仓储门禁测试的有效到期结果。"""
+
+    payload: dict[str, object] = {
+        "prediction_snapshot_id": snapshot_id,
+        "prediction_time": 时间,
+        "horizon_trading_days": 1,
+        "reference_trading_day": date(2026, 7, 14),
+        "expiry_trading_day": date(2026, 7, 15),
+        "trading_calendar": 日历,
+        "trading_calendar_version": "calendar-us-v1",
+        "reference_total_return_adjusted_price": Decimal("100"),
+        "expiry_total_return_adjusted_price": Decimal("101"),
+        "expiry_price_available_at": 时间 + timedelta(days=1),
+        "validated_at": 时间 + timedelta(days=2),
+        "prediction_label_rule": 规则,
+        "outcome_fact_references": _完整到期事实(snapshot_id=snapshot_id),
+        "security_id": 证券,
+        "price_data_version": "daily-v1",
+    }
+    payload.update(overrides)
+    return resolve_actual_outcome(**payload)
+
+
+def test_缺少两端可交易状态事实的结果不得验证() -> None:
+    """价格齐全也不能替代参考日和到期日的可交易性事实。"""
+
+    outcome = _已验证到期结果(
+        snapshot_id="snapshot-tradability",
+        outcome_fact_references=_完整到期事实(
+            snapshot_id="snapshot-tradability", include_tradability=False
+        ),
+    )
+
+    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
+
+
+def test_仓储拒绝调用方伪造的已验证标签结果() -> None:
+    """仓储入口必须重验事实和标签，不能信任调用方声称的 VALIDATED。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-direct", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-direct")
+    forged = ActualOutcome(
+        **{**outcome.__dict__, "status": ActualOutcomeStatus.VALIDATED, "label": "UP"}
+    )
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+@pytest.mark.parametrize(
+    ("reference_market_time", "expiry_market_time"),
+    [
+        (时间 - timedelta(days=1), 时间 + timedelta(days=1)),
+        (时间, 时间 + timedelta(days=2)),
+    ],
+)
+def test_价格事实市场日期必须严格绑定参考日与到期日(
+    reference_market_time: datetime, expiry_market_time: datetime
+) -> None:
+    """不允许以前后交易日的价格替代指定预测边界价格。"""
+
+    outcome = _已验证到期结果(
+        snapshot_id="snapshot-price-date",
+        outcome_fact_references=_完整到期事实(
+            snapshot_id="snapshot-price-date",
+            reference_market_time=reference_market_time,
+            expiry_market_time=expiry_market_time,
+        ),
+    )
+
+    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
+
+
+def test_解析器拒绝调用方注入未受信本地签发方() -> None:
+    """签发方只能由应用受信注册表决定，调用方不得替换。"""
+
+    with pytest.raises(TypeError):
+        _已验证到期结果(
+            snapshot_id="snapshot-untrusted-issuer",
+            fact_issuer=LocalFactIssuer("attacker"),
+        )

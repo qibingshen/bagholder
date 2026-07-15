@@ -136,6 +136,8 @@ def 到期结果(
             "daily-us-v1",
             None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率),
         ),
+        ("REFERENCE_TRADABILITY", "daily-us-v1", "TRADABLE"),
+        ("EXPIRY_TRADABILITY", "daily-us-v1", "TRADABLE"),
         ("TRADING_CALENDAR", 日历事实.version_id, 日历事实),
         ("LABEL_RULE", 标签规则.version_id, 标签规则),
         ("COMPANY_ACTIONS", "company-actions-v1", ()),
@@ -150,9 +152,27 @@ def 到期结果(
             source_id="local-verified-history",
             tool_name="local_fact_store",
             tool_version="v1",
-            market_time=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
-            collected_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
-            available_at=预测时点 if 事实类型 == "REFERENCE_PRICE" else 验证时点,
+            market_time=(
+                预测时点
+                if 事实类型 == "REFERENCE_PRICE"
+                else datetime.combine(到期日, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+                if 事实类型 == "EXPIRY_PRICE"
+                else 验证时点
+            ),
+            collected_at=(
+                预测时点
+                if 事实类型 == "REFERENCE_PRICE"
+                else datetime.combine(到期日, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+                if 事实类型 == "EXPIRY_PRICE"
+                else 验证时点
+            ),
+            available_at=(
+                预测时点
+                if 事实类型 == "REFERENCE_PRICE"
+                else datetime.combine(到期日, datetime.min.time(), tzinfo=UTC).replace(hour=12)
+                if 事实类型 == "EXPIRY_PRICE"
+                else 验证时点
+            ),
             version_id=版本,
             result_id=f"{事实类型}:{版本}",
             result_anchor=f"local://outcomes/{事实类型}:{版本}",
