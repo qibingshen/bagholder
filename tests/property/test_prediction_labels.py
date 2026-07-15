@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 from math import inf, nan
 
 import pytest
@@ -13,6 +14,7 @@ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
     CurrentPredictionUnavailableError,
+    OutcomeFactReference,
     PredictionInput,
     PredictionLabel,
     PredictionLabelRule,
@@ -118,6 +120,33 @@ def 到期结果(
 
     到期日 = 传入到期日 or 到期交易日(周期, 日历)
     日历事实 = 解析日历 or 日历
+    验证时点 = max(
+        (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
+        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
+    )
+    到期事实 = tuple(
+        OutcomeFactReference(
+            fact_type=事实类型,
+            reference_type="LOCAL",
+            source_id="local-verified-history",
+            tool_name="local_fact_store",
+            tool_version="v1",
+            market_time=验证时点,
+            collected_at=验证时点,
+            available_at=验证时点,
+            version_id=版本,
+            result_id=f"{事实类型}:{版本}",
+            result_anchor=f"local://outcomes/{事实类型}:{版本}",
+            fact_value=f"{事实类型}:{版本}",
+            value_hash=sha256(f"{事实类型}:{事实类型}:{版本}".encode()).hexdigest(),
+        )
+        for 事实类型, 版本 in (
+            ("REFERENCE_PRICE", "daily-us-v1"),
+            ("EXPIRY_PRICE", "daily-us-v1"),
+            ("TRADING_CALENDAR", 日历事实.version_id),
+            ("LABEL_RULE", 标签规则.version_id),
+        )
+    )
     return resolve_actual_outcome(
         prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
         prediction_time=预测时点,
@@ -131,11 +160,9 @@ def 到期结果(
             None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率)
         ),
         expiry_price_available_at=到期价格可得时点,
-        validated_at=max(
-            (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
-            datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
-        ),
+        validated_at=验证时点,
         prediction_label_rule=标签规则,
+        outcome_fact_references=到期事实,
     )
 
 

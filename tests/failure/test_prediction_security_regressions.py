@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +11,7 @@ from stock_agent.domain.market import InstrumentIdentity, Market
 from stock_agent.domain.market_rules import TradingCalendar
 from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
+    OutcomeFactReference,
     PredictionInput,
     PredictionLabelRule,
     PredictionOutput,
@@ -63,6 +65,11 @@ def _引用(field: str) -> QuantitativeFactReference:
     return QuantitativeFactReference(
         reference_type="LOCAL",
         result_id=f"fact-{field}",
+        tool_name="local_fact_store",
+        tool_version="v1",
+        called_at=时间,
+        data_as_of=时间,
+        result_anchor=f"local://facts/fact-{field}",
         source_id="local-bars",
         security_id=证券,
         prediction_time=时间,
@@ -154,7 +161,68 @@ def test_已有价格的非交易到期日保持待验证() -> None:
         prediction_label_rule=规则,
     )
     assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
-    assert outcome.label is None
+
+
+def test_到期结果缺少结构化事实引用时不能验证() -> None:
+    """到期价格、日历和规则没有可审计来源时不能产生历史标签。"""
+
+    outcome = resolve_actual_outcome(
+        prediction_snapshot_id="snapshot-facts",
+        prediction_time=时间,
+        horizon_trading_days=1,
+        reference_trading_day=date(2026, 7, 14),
+        expiry_trading_day=date(2026, 7, 15),
+        trading_calendar=日历,
+        trading_calendar_version="calendar-us-v1",
+        reference_total_return_adjusted_price=Decimal("100"),
+        expiry_total_return_adjusted_price=Decimal("101"),
+        expiry_price_available_at=时间 + timedelta(days=1),
+        validated_at=时间 + timedelta(days=1),
+        prediction_label_rule=规则,
+    )
+    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
+    assert outcome.fact_references == ()
+
+
+def test_到期结果保存完整的结构化事实引用() -> None:
+    """已验证结果必须持久保留价格、日历与规则的事实来源。"""
+
+    validated_at = 时间 + timedelta(days=2)
+    facts = tuple(
+        OutcomeFactReference(
+            fact_type=fact_type,
+            reference_type="LOCAL",
+            source_id="local-history",
+            tool_name="local_fact_store",
+            tool_version="v1",
+            market_time=validated_at,
+            collected_at=validated_at,
+            available_at=validated_at,
+            version_id="daily-v1" if "PRICE" in fact_type else "calendar-us-v1",
+            result_id=f"result-{fact_type}",
+            result_anchor=f"local://outcomes/result-{fact_type}",
+            fact_value=f"{fact_type}:daily-v1",
+            value_hash=sha256(f"{fact_type}:{fact_type}:daily-v1".encode()).hexdigest(),
+        )
+        for fact_type in ("REFERENCE_PRICE", "EXPIRY_PRICE", "TRADING_CALENDAR", "LABEL_RULE")
+    )
+    outcome = resolve_actual_outcome(
+        prediction_snapshot_id="snapshot-facts",
+        prediction_time=时间,
+        horizon_trading_days=1,
+        reference_trading_day=date(2026, 7, 14),
+        expiry_trading_day=date(2026, 7, 15),
+        trading_calendar=日历,
+        trading_calendar_version="calendar-us-v1",
+        reference_total_return_adjusted_price=Decimal("100"),
+        expiry_total_return_adjusted_price=Decimal("101"),
+        expiry_price_available_at=validated_at,
+        validated_at=validated_at,
+        prediction_label_rule=规则,
+        outcome_fact_references=facts,
+    )
+    assert outcome.status is ActualOutcomeStatus.VALIDATED
+    assert outcome.fact_references == facts
 
 
 def test_快照追加对调用方嵌套对象防御拷贝() -> None:
@@ -185,3 +253,72 @@ def test_结果追加拒绝非快照派生的预测时点() -> None:
     )
     with pytest.raises(ValueError, match="预测时点|快照"):
         store.append_actual_outcome(outcome)
+
+
+@pytest.mark.parametrize("字段", ["market_time", "collected_at", "reference_price_available_at"])
+def test_预测输入拒绝预测时点后才可得的市场或参考价格事实(字段: str) -> None:
+    """预测不能引用预测时点后才到达的行情或参考价格。"""
+
+    with pytest.raises(ValueError, match="预测时点|可得|市场|采集|参考"):
+        _输入(**{字段: 时间 + timedelta(seconds=1)})
+
+
+def test_预测输入拒绝未枚举的新鲜度值() -> None:
+    """新鲜度必须使用受限枚举，未知字符串不能伪装为当前数据。"""
+
+    with pytest.raises(ValueError, match="新鲜度|当前预测|freshness"):
+        _输入(freshness="MAYBE_CURRENT")
+
+
+def test_量化事实引用必须具有结构化工具审计锚点() -> None:
+    """仅有自由文本和值哈希不足以证明数字来自本地或 MCP 工具。"""
+
+    payload = _引用("up_probability").model_dump()
+    for field in ("tool_name", "tool_version", "called_at", "data_as_of", "result_anchor"):
+        payload.pop(field)
+    with pytest.raises(ValidationError, match="Field required"):
+        QuantitativeFactReference(**payload)
+
+
+def test_快照追加拒绝输入输出证券版本和新鲜度不一致() -> None:
+    """追加前必须绑定同一证券、版本与新鲜度，避免混合不同事实。"""
+
+    store = PredictionSnapshotStore()
+    with pytest.raises(ValueError, match="证券|版本|新鲜度"):
+        store.append("snapshot-mismatch", _输入(), _输出(freshness="NEAR_REALTIME"))
+
+
+def test_快照读取不能改写仓库内已保存的嵌套输出() -> None:
+    """读取者修改返回对象不得污染追加保存的预测快照。"""
+
+    store = PredictionSnapshotStore()
+    returned = store.append("snapshot-copy", _输入(), _输出())
+    returned.prediction_output.primary_evidence = ("错误覆盖",)
+    later = store._snapshots["snapshot-copy"]
+    assert later.prediction_output.primary_evidence == ("本地事实",)
+
+
+@pytest.mark.parametrize(
+    "reference_price, expiry_price",
+    [(Decimal("0"), Decimal("101")), (Decimal("100"), Decimal("0"))],
+)
+def test_非正到期价格保持待验证而不参与除法(
+    reference_price: Decimal, expiry_price: Decimal
+) -> None:
+    """零或负价格不可形成可审计收益率，必须安全保持待验证。"""
+
+    outcome = resolve_actual_outcome(
+        prediction_snapshot_id="snapshot-price",
+        prediction_time=时间,
+        horizon_trading_days=1,
+        reference_trading_day=date(2026, 7, 14),
+        expiry_trading_day=date(2026, 7, 15),
+        trading_calendar=日历,
+        trading_calendar_version="calendar-us-v1",
+        reference_total_return_adjusted_price=reference_price,
+        expiry_total_return_adjusted_price=expiry_price,
+        expiry_price_available_at=时间 + timedelta(days=1),
+        validated_at=时间 + timedelta(days=1),
+        prediction_label_rule=规则,
+    )
+    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION

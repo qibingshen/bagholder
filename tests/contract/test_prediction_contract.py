@@ -45,6 +45,7 @@ def 完整预测输入() -> dict[str, object]:
         "feature_version": "features-v1",
         "source_id": "local-daily-bars",
         "model_version": "baseline-v1",
+        "prediction_label_rule_version": "prediction-label-v1",
         "is_current_data_available": True,
     }
 
@@ -61,6 +62,11 @@ def 量化事实引用(覆盖字段: str) -> QuantitativeFactReference:
     return QuantitativeFactReference(
         reference_type="LOCAL",
         result_id="daily-us-v1:NASDAQ:AAPL:2026-07-14",
+        tool_name="local_fact_store",
+        tool_version="v1",
+        called_at=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        data_as_of=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
+        result_anchor="local://facts/daily-us-v1:NASDAQ:AAPL:2026-07-14",
         source_id="local-daily-bars",
         security_id=完整证券身份(),
         prediction_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),

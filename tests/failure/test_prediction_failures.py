@@ -96,6 +96,11 @@ def 有效预测输出(**覆盖: object) -> PredictionOutput:
         QuantitativeFactReference(
             reference_type="LOCAL",
             result_id=f"{负载['data_version']}:NASDAQ:AAPL:{字段}",
+            tool_name="local_fact_store",
+            tool_version="v1",
+            called_at=预测时点,
+            data_as_of=预测时点,
+            result_anchor=f"local://facts/{负载['data_version']}:NASDAQ:AAPL:{字段}",
             source_id="local-verified-bars",
             security_id=证券,
             prediction_time=预测时点,
