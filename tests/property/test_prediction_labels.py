@@ -8,6 +8,8 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 from pydantic import ValidationError
+
+from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
     CurrentPredictionUnavailableError,
@@ -18,8 +20,6 @@ from stock_agent.domain.prediction import (
     resolve_actual_outcome,
     validate_prediction_probabilities,
 )
-
-from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 
 允许周期 = (1, 5, 20)
 阈值 = {
@@ -89,6 +89,7 @@ def 预测输入负载(**覆盖: object) -> dict[str, object]:
         "predicted_at": 预测时点,
         "market_time": 预测时点,
         "collected_at": 预测时点,
+        "source_id": "local-verified-bars",
         "data_version": "daily-us-v1",
         "feature_version": "features-v1",
         "trading_calendar_version": "calendar-us-v1",
@@ -130,7 +131,10 @@ def 到期结果(
             None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率)
         ),
         expiry_price_available_at=到期价格可得时点,
-        validated_at=(到期价格可得时点 or 预测时点) + timedelta(seconds=1),
+        validated_at=max(
+            (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
+            datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
+        ),
         prediction_label_rule=标签规则,
     )
 
@@ -197,14 +201,26 @@ def test_实际结果解析器拒绝自然日到期日和错日历版本(周期:
     日历 = 市场日历()
     可得时点 = 预测时点 + timedelta(days=31)
 
-    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
-        到期结果(
+    自然日到期日 = 参考交易日 + timedelta(days=周期)
+    if not 日历.is_trading_day(自然日到期日):
+        自然日到期结果 = 到期结果(
             周期=周期,
             收益率=Decimal("0"),
             日历=日历,
             到期价格可得时点=可得时点,
-            传入到期日=参考交易日 + timedelta(days=周期),
+            传入到期日=自然日到期日,
         )
+        assert 自然日到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
+        assert 自然日到期结果.label is None
+    else:
+        with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
+            到期结果(
+                周期=周期,
+                收益率=Decimal("0"),
+                日历=日历,
+                到期价格可得时点=可得时点,
+                传入到期日=自然日到期日,
+            )
 
     with pytest.raises(PredictionLabelRuleError, match="日历版本|日历"):
         到期结果(
@@ -216,17 +232,18 @@ def test_实际结果解析器拒绝自然日到期日和错日历版本(周期:
         )
 
     错日历 = 市场日历(
-        tuple(交易日 for 交易日 in 有效交易日 if 交易日 != date(2026, 7, 6)),
+        tuple(交易日 for 交易日 in 有效交易日 if 交易日 != 到期交易日(周期, 日历)),
         版本="calendar-us-v2",
     )
-    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
-        到期结果(
-            周期=周期,
-            收益率=Decimal("0"),
-            日历=日历,
-            解析日历=错日历,
-            到期价格可得时点=可得时点,
-        )
+    非交易日到期结果 = 到期结果(
+        周期=周期,
+        收益率=Decimal("0"),
+        日历=日历,
+        解析日历=错日历,
+        到期价格可得时点=可得时点,
+    )
+    assert 非交易日到期结果.status is ActualOutcomeStatus.PENDING_VALIDATION
+    assert 非交易日到期结果.label is None
 
 
 @given(st.integers(min_value=-100, max_value=100).filter(lambda 周期: 周期 not in 允许周期))

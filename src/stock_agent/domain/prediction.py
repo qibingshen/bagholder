@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from hashlib import sha256
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -51,14 +53,71 @@ class QuantitativeFactReference(BaseModel):
     """为每个量化展示数字保留可核验的本地或 MCP 事实来源。"""
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
-    reference_type: str
+    reference_type: Literal["MCP", "LOCAL"]
     result_id: str
     source_id: str
     security_id: object
     prediction_time: datetime
     data_version: str
+    feature_version: str
     model_version: str
-    covered_fields: tuple[str, ...]
+    label_rule_version: str
+    covered_fields: tuple[str, ...] = ()
+    field_evidence: tuple[QuantitativeFieldEvidence, ...]
+
+    @model_validator(mode="after")
+    def validate_reference_identity(self) -> QuantitativeFactReference:
+        if (
+            any(
+                not isinstance(value, str) or not value.strip() or value == "UNSPECIFIED"
+                for value in (
+                    self.result_id,
+                    self.source_id,
+                    self.data_version,
+                    self.feature_version,
+                    self.model_version,
+                    self.label_rule_version,
+                )
+            )
+            or self.security_id is None
+        ):
+            raise ValueError("事实引用必须包含非空且已指定的标识与版本")
+        _require_aware(self.prediction_time, "事实引用预测时点")
+        if not self.field_evidence:
+            raise ValueError("事实引用必须包含逐字段数值、哈希和值证据")
+        return self
+
+
+class QuantitativeFieldEvidence(BaseModel):
+    """绑定一个展示数值及其可复核摘要，覆盖声明本身不能构成证据。"""
+
+    model_config = ConfigDict(frozen=True)
+    field_name: str
+    numeric_value: Decimal
+    value_hash: str
+    value_evidence: str
+
+    @model_validator(mode="after")
+    def validate_value_evidence(self) -> QuantitativeFieldEvidence:
+        if (
+            not self.field_name.strip()
+            or not self.value_evidence.strip()
+            or not self.numeric_value.is_finite()
+        ):
+            raise ValueError("数值证据必须完整且为有限数")
+        if self.value_hash != quantitative_value_hash(self.field_name, self.numeric_value):
+            raise ValueError("数值证据哈希不匹配")
+        return self
+
+
+def quantitative_value_hash(field_name: str, value: Decimal | float) -> str:
+    """返回稳定的字段值摘要，仅供验证本地或 MCP 事实的逐字段绑定。"""
+    return sha256(f"{field_name}:{Decimal(str(value)).normalize()}".encode()).hexdigest()
+
+
+def _require_aware(value: datetime, name: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name}必须带时区")
 
 
 class PredictionInput(BaseModel):
@@ -82,6 +141,8 @@ class PredictionInput(BaseModel):
     time_is_verifiable: bool = True
     is_current_data_available: bool
     company_actions: tuple[CompanyAction, ...] = ()
+    reference_total_return_adjusted_price: Decimal | None = None
+    reference_price_available_at: datetime | None = None
 
     def __init__(self, **data: object) -> None:
         try:
@@ -108,7 +169,7 @@ class PredictionInput(BaseModel):
                 if isinstance(action, CompanyAction)
             ):
                 raise CurrentPredictionUnavailableError("公司行动在预测时点后才可得或生效") from exc
-            if "source_id" in data:
+            if data.get("source_id") is None or data.get("source_id") == "UNSPECIFIED":
                 raise CurrentPredictionUnavailableError(
                     "来源、市场时间、采集时间、数据版本或特征版本不可验证"
                 ) from exc
@@ -132,6 +193,14 @@ class PredictionInput(BaseModel):
             raise CurrentPredictionUnavailableError(
                 "来源、市场时间、采集时间、数据版本和特征版本必须可验证"
             )
+        if self.source_id == "UNSPECIFIED":
+            raise CurrentPredictionUnavailableError("来源不得为 UNSPECIFIED")
+        for name, value in (
+            ("预测时点", self.predicted_at),
+            ("市场时点", self.market_time),
+            ("采集时点", self.collected_at),
+        ):
+            _require_aware(value, name)
         if not self.is_current_data_available:
             raise CurrentPredictionUnavailableError("当前预测数据不可用")
         if not self.time_is_verifiable:
@@ -143,9 +212,17 @@ class PredictionInput(BaseModel):
             ("特征", self.feature_available_at),
             ("特征截止", self.feature_cutoff_at),
         ):
+            if value is not None:
+                _require_aware(value, f"{label}可得时点")
             if value is not None and value > self.predicted_at:
                 raise CurrentPredictionUnavailableError(f"{label}在预测时点后才可得")
         for action in self.company_actions:
+            if (
+                action.security_id is None
+                or action.market is None
+                or action.security_id != self.security_id
+            ):
+                raise CurrentPredictionUnavailableError("公司行动必须绑定目标证券与市场")
             if action.effective_at > self.predicted_at or (
                 action.available_at and action.available_at > self.predicted_at
             ):
@@ -209,10 +286,27 @@ class PredictionOutput(BaseModel):
         )
         if self.disclaimer != FIXED_RESEARCH_DISCLAIMER:
             raise ValueError(FIXED_RESEARCH_DISCLAIMER)
+        _require_aware(self.predicted_at, "预测时点")
+        if (
+            not self.primary_evidence
+            or not self.risk_factors
+            or any(not item.strip() for item in (*self.primary_evidence, *self.risk_factors))
+        ):
+            raise ValueError("主要依据和风险因素必须非空")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in (
+                self.data_version,
+                self.feature_version,
+                self.model_version,
+                self.label_rule_version,
+            )
+        ):
+            raise ValueError("数据、特征、模型和规则版本必须非空")
         text = " ".join((*self.primary_evidence, *self.risk_factors, self.disclaimer))
         if any(term in text for term in ("保证", "收益", "买入", "卖出", "立即买", "交易指令")):
             raise ValueError("研究输出不得包含收益承诺或买卖指令")
-        coverage: set[str] = set()
+        evidence_by_field: dict[str, QuantitativeFieldEvidence] = {}
         for reference in self.quantitative_fact_references:
             if reference.reference_type not in {"MCP", "LOCAL"}:
                 raise ValueError("事实引用类型必须为 MCP 或 LOCAL")
@@ -221,14 +315,23 @@ class PredictionOutput(BaseModel):
                 or reference.prediction_time != self.predicted_at
             ):
                 raise ValueError("事实引用的证券或时点不匹配")
-            if self.feature_version is None and (
+            if (
                 reference.data_version != self.data_version
+                or reference.feature_version != self.feature_version
                 or reference.model_version != self.model_version
+                or reference.label_rule_version != self.label_rule_version
             ):
-                raise ValueError("事实引用的数据版本或模型版本不匹配")
-            coverage.update(reference.covered_fields)
-        if not _NUMERIC_FIELDS.issubset(coverage):
-            raise ValueError("事实引用必须逐项覆盖量化字段")
+                raise ValueError("事实引用的版本不匹配")
+            for evidence in reference.field_evidence:
+                if evidence.field_name in evidence_by_field:
+                    raise ValueError("每个量化字段只能有一条绑定证据")
+                evidence_by_field[evidence.field_name] = evidence
+        for field_name in _NUMERIC_FIELDS:
+            evidence = evidence_by_field.get(field_name)
+            if evidence is None or evidence.numeric_value != Decimal(
+                str(getattr(self, field_name))
+            ):
+                raise ValueError("事实引用必须逐字段绑定数值、哈希和值证据")
         return self
 
 
@@ -292,6 +395,8 @@ def resolve_actual_outcome(
     company_actions_available_at: datetime | None = None,
 ) -> ActualOutcome:
     """独立解析到期事实；缺价或无效到期日仅形成待验证结果。"""
+    for name, value in (("预测时点", prediction_time), ("验证时点", validated_at)):
+        _require_aware(value, name)
     if horizon_trading_days not in _HORIZONS:
         raise PredictionLabelRuleError("交易日周期不受支持")
     if trading_calendar.version_id != trading_calendar_version or (
@@ -317,15 +422,12 @@ def resolve_actual_outcome(
         for action in company_actions
     ):
         raise PredictionLabelRuleError("公司行动可得时点晚于验证边界")
-    if expiry_total_return_adjusted_price is not None and (
-        not trading_calendar.is_trading_day(expiry_trading_day)
-        or not trading_calendar.is_trading_day(reference_trading_day)
-    ):
-        raise PredictionLabelRuleError("到期日必须是有效交易日")
     if (
         not trading_calendar.is_trading_day(expiry_trading_day)
         or not trading_calendar.is_trading_day(reference_trading_day)
         or expiry_total_return_adjusted_price is None
+        or expiry_price_available_at is None
+        or validated_at.date() <= expiry_trading_day
     ):
         return ActualOutcome(
             prediction_snapshot_id,
@@ -335,7 +437,7 @@ def resolve_actual_outcome(
             expiry_trading_day,
             trading_calendar_version,
             reference_total_return_adjusted_price,
-            None,
+            expiry_total_return_adjusted_price,
             ActualOutcomeStatus.PENDING_VALIDATION,
             None,
             prediction_label_rule.version_id,
@@ -344,21 +446,6 @@ def resolve_actual_outcome(
     days = sorted(trading_calendar.trading_days)
     if days.index(expiry_trading_day) != days.index(reference_trading_day) + horizon_trading_days:
         raise PredictionLabelRuleError("到期日必须按市场有效交易日计算")
-    if expiry_price_available_at is None:
-        return ActualOutcome(
-            prediction_snapshot_id,
-            prediction_time,
-            horizon_trading_days,
-            reference_trading_day,
-            expiry_trading_day,
-            trading_calendar_version,
-            reference_total_return_adjusted_price,
-            None,
-            ActualOutcomeStatus.PENDING_VALIDATION,
-            None,
-            prediction_label_rule.version_id,
-            pending_reason,
-        )
     change = expiry_total_return_adjusted_price / reference_total_return_adjusted_price - Decimal(
         "1"
     )
@@ -418,8 +505,13 @@ class PredictionSnapshotStore:
     ) -> PredictionSnapshot:
         if snapshot_id in self._snapshots:
             raise ImmutablePredictionSnapshotError("预测快照只能追加，不能覆盖")
+        if prediction_input.predicted_at != prediction_output.predicted_at:
+            raise ImmutablePredictionSnapshotError("快照输入输出预测时点必须一致")
         snapshot = PredictionSnapshot(
-            snapshot_id, prediction_input, prediction_output, prediction_input.predicted_at
+            snapshot_id,
+            prediction_input.model_copy(deep=True),
+            prediction_output.model_copy(deep=True),
+            prediction_input.predicted_at,
         )
         self._snapshots[snapshot_id] = snapshot
         return snapshot
@@ -429,8 +521,54 @@ class PredictionSnapshotStore:
             outcome.prediction_snapshot_id
         ):
             raise ImmutablePredictionSnapshotError("到期结果只能追加且不可重复或覆盖")
-        self._outcomes.setdefault(outcome.prediction_snapshot_id, []).append(outcome)
-        return outcome
+        snapshot = self._snapshots[outcome.prediction_snapshot_id]
+        if outcome.prediction_time != snapshot.prediction_input.predicted_at:
+            raise ImmutablePredictionSnapshotError("到期结果预测时点必须由快照派生")
+        if outcome.horizon_trading_days != snapshot.prediction_output.horizon_trading_days:
+            raise ImmutablePredictionSnapshotError("到期结果周期必须由快照派生")
+        if outcome.trading_calendar_version != snapshot.prediction_input.trading_calendar_version:
+            raise ImmutablePredictionSnapshotError("到期结果日历版本必须与快照一致")
+        if outcome.label_rule_version != snapshot.prediction_input.prediction_label_rule_version:
+            raise ImmutablePredictionSnapshotError("到期结果规则版本必须与快照一致")
+        stored = ActualOutcome(**outcome.__dict__)
+        self._outcomes.setdefault(outcome.prediction_snapshot_id, []).append(stored)
+        return stored
 
     def actual_outcomes_for(self, snapshot_id: str) -> tuple[ActualOutcome, ...]:
         return tuple(self._outcomes.get(snapshot_id, ()))
+
+
+def generate_simple_baseline_prediction(
+    prediction_input: PredictionInput,
+    *,
+    horizon_trading_days: int,
+    primary_evidence: tuple[str, ...],
+    risk_factors: tuple[str, ...],
+    quantitative_fact_references: tuple[QuantitativeFactReference, ...],
+) -> PredictionOutput:
+    """基于预测时点已可得的本地事实生成固定简单基准概率，不训练、发布或交易。"""
+    if any(reference.reference_type != "LOCAL" for reference in quantitative_fact_references):
+        raise CurrentPredictionUnavailableError("简单基准只接受预测时点可用的本地事实")
+    if any(
+        reference.prediction_time > prediction_input.predicted_at
+        for reference in quantitative_fact_references
+    ):
+        raise CurrentPredictionUnavailableError("简单基准不得使用未来事实")
+    return PredictionOutput(
+        security_id=prediction_input.security_id,
+        predicted_at=prediction_input.predicted_at,
+        data_version=prediction_input.data_version,
+        feature_version=prediction_input.feature_version,
+        horizon_trading_days=horizon_trading_days,
+        up_probability=Decimal("34"),
+        flat_probability=Decimal("33"),
+        down_probability=Decimal("33"),
+        confidence=Decimal("0.5"),
+        primary_evidence=primary_evidence,
+        risk_factors=risk_factors,
+        freshness=prediction_input.freshness,
+        model_version=prediction_input.model_version,
+        label_rule_version=prediction_input.prediction_label_rule_version or "",
+        disclaimer=FIXED_RESEARCH_DISCLAIMER,
+        quantitative_fact_references=quantitative_fact_references,
+    )

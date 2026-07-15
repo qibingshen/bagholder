@@ -1,6 +1,7 @@
 """验证预测输入、输出和不可变快照的量化安全契约。"""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
@@ -15,6 +16,8 @@ from stock_agent.domain.prediction import (
     PredictionOutput,
     PredictionSnapshotStore,
     QuantitativeFactReference,
+    QuantitativeFieldEvidence,
+    quantitative_value_hash,
 )
 
 
@@ -40,6 +43,7 @@ def 完整预测输入() -> dict[str, object]:
         "collected_at": market_time,
         "data_version": "daily-us-v1",
         "feature_version": "features-v1",
+        "source_id": "local-daily-bars",
         "model_version": "baseline-v1",
         "is_current_data_available": True,
     }
@@ -48,6 +52,12 @@ def 完整预测输入() -> dict[str, object]:
 def 量化事实引用(覆盖字段: str) -> QuantitativeFactReference:
     """构造覆盖单个量化字段且与预测元数据一致的本地事实引用。"""
 
+    value = {
+        "up_probability": Decimal("42.5"),
+        "flat_probability": Decimal("35"),
+        "down_probability": Decimal("22.5"),
+        "confidence": Decimal("0.61"),
+    }.get(覆盖字段, Decimal("0"))
     return QuantitativeFactReference(
         reference_type="LOCAL",
         result_id="daily-us-v1:NASDAQ:AAPL:2026-07-14",
@@ -55,8 +65,18 @@ def 量化事实引用(覆盖字段: str) -> QuantitativeFactReference:
         security_id=完整证券身份(),
         prediction_time=datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         data_version="daily-us-v1",
+        feature_version="features-v1",
         model_version="baseline-v1",
+        label_rule_version="prediction-label-v1",
         covered_fields=(覆盖字段,),
+        field_evidence=(
+            QuantitativeFieldEvidence(
+                field_name=覆盖字段,
+                numeric_value=value,
+                value_hash=quantitative_value_hash(覆盖字段, value),
+                value_evidence="本地可复核事实",
+            ),
+        ),
     )
 
 
@@ -67,6 +87,7 @@ def 完整预测输出() -> dict[str, object]:
         "security_id": 完整证券身份(),
         "predicted_at": datetime(2026, 7, 14, 9, 30, tzinfo=UTC),
         "data_version": "daily-us-v1",
+        "feature_version": "features-v1",
         "horizon_trading_days": 5,
         "up_probability": 42.5,
         "flat_probability": 35.0,
@@ -76,6 +97,7 @@ def 完整预测输出() -> dict[str, object]:
         "risk_factors": ("财报披露前波动可能放大",),
         "freshness": "REALTIME",
         "model_version": "baseline-v1",
+        "label_rule_version": "prediction-label-v1",
         "disclaimer": FIXED_RESEARCH_DISCLAIMER,
         "quantitative_fact_references": tuple(
             量化事实引用(字段)
@@ -141,7 +163,8 @@ def test_预测输出拒绝非规定交易日周期() -> None:
 
 
 @pytest.mark.parametrize(
-    "field", ["confidence", "primary_evidence", "risk_factors", "freshness", "model_version", "disclaimer"]
+    "field",
+    ["confidence", "primary_evidence", "risk_factors", "freshness", "model_version", "disclaimer"],
 )
 def test_预测输出拒绝缺少规定安全字段(field: str) -> None:
     """置信度、依据、风险、新鲜度、模型版本和固定提示均为不可省略字段。"""
@@ -188,11 +211,32 @@ def test_预测输出接受概率总和处于容差边界的结果(down_probabil
 
     payload = 完整预测输出()
     payload.update(up_probability=40.0, flat_probability=30.0, down_probability=down_probability)
+    payload["quantitative_fact_references"] = tuple(
+        量化事实引用(field).model_copy(
+            update={
+                "field_evidence": (
+                    QuantitativeFieldEvidence(
+                        field_name=field,
+                        numeric_value=Decimal(str(value)),
+                        value_hash=quantitative_value_hash(field, Decimal(str(value))),
+                        value_evidence="本地可复核事实",
+                    ),
+                )
+            }
+        )
+        for field, value in (
+            ("up_probability", 40.0),
+            ("flat_probability", 30.0),
+            ("down_probability", down_probability),
+            ("confidence", 0.61),
+        )
+    )
 
     output = PredictionOutput(**payload)
 
-    assert output.up_probability + output.flat_probability + output.down_probability == pytest.approx(
-        70.0 + down_probability, abs=1e-9
+    assert (
+        output.up_probability + output.flat_probability + output.down_probability
+        == pytest.approx(70.0 + down_probability, abs=1e-9)
     )
 
 
@@ -261,7 +305,12 @@ def test_预测输出拒绝非MCP或LOCAL类型的量化事实引用() -> None:
 @pytest.mark.parametrize(
     ("reference_field", "reference_value"),
     [
-        ("security_id", InstrumentIdentity(market=Market.US, exchange="NYSE", display_code="MSFT", currency="USD")),
+        (
+            "security_id",
+            InstrumentIdentity(
+                market=Market.US, exchange="NYSE", display_code="MSFT", currency="USD"
+            ),
+        ),
         ("prediction_time", datetime(2026, 7, 14, 9, 31, tzinfo=UTC)),
         ("data_version", "daily-us-v2"),
         ("model_version", "baseline-v2"),
@@ -282,7 +331,9 @@ def test_预测输出拒绝与预测元数据不匹配的量化事实引用(
         PredictionOutput(**payload)
 
 
-@pytest.mark.parametrize("missing_field", ["up_probability", "flat_probability", "down_probability", "confidence"])
+@pytest.mark.parametrize(
+    "missing_field", ["up_probability", "flat_probability", "down_probability", "confidence"]
+)
 def test_预测输出拒绝有数值却没有逐项覆盖引用(missing_field: str) -> None:
     """上涨、震荡、下跌概率和置信度必须各有至少一个结构化事实引用。"""
 
@@ -314,6 +365,9 @@ def test_预测快照只允许追加且当前与历史过期展示语义不同()
             prediction_output=PredictionOutput(**完整预测输出()),
         )
 
-    assert snapshot.display_state_for_current_data("STALE") is PredictionDisplayState.CURRENT_UNAVAILABLE
+    assert (
+        snapshot.display_state_for_current_data("STALE")
+        is PredictionDisplayState.CURRENT_UNAVAILABLE
+    )
     assert snapshot.display_state_for_history() is PredictionDisplayState.HISTORICAL_SNAPSHOT
     assert snapshot.generated_at == datetime(2026, 7, 14, 9, 30, tzinfo=UTC)
