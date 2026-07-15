@@ -38,6 +38,22 @@ def test_未经授权发布和_mcp_管理动作必须拒绝() -> None:
     assert decision.error_code == "PERMISSION_DENIED"
 
 
+def test_mcp_回滚删除和数据删除管理动作默认拒绝() -> None:
+    """MCP 管理动作即使传入伪造桌面确认参数，也不能绕过只读研究边界。"""
+
+    from stock_agent.adapters.mcp.management_guard import MCPManagementGuard
+
+    guard = MCPManagementGuard()
+
+    for action in ("model.rollback", "model.delete", "data.delete"):
+        decision = guard.authorize(
+            action,
+            desktop_confirmation_id="fake-confirmation",
+        )
+        assert decision.allowed is False
+        assert decision.error_code == "PERMISSION_DENIED"
+
+
 def test_原子切换失败时保留当前正式模型() -> None:
     """发布指针切换失败不得留下半发布状态。"""
 
