@@ -13,6 +13,7 @@ from stock_agent.domain.prediction import (
     CurrentPredictionUnavailableError,
     PredictionInput,
     PredictionLabel,
+    PredictionLabelRule,
     PredictionLabelRuleError,
     resolve_actual_outcome,
     validate_prediction_probabilities,
@@ -26,6 +27,10 @@ from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
     5: Decimal("0.03"),
     20: Decimal("0.06"),
 }
+规则_v1 = PredictionLabelRule(
+    version_id="prediction-label-v1",
+    thresholds=阈值,
+)
 预测时点 = datetime(2026, 7, 2, 9, 30, tzinfo=UTC)
 参考交易日 = date(2026, 7, 2)
 
@@ -80,6 +85,10 @@ def 预测输入负载(**覆盖: object) -> dict[str, object]:
         "collected_at": 预测时点,
         "data_version": "daily-us-v1",
         "feature_version": "features-v1",
+        "trading_calendar_version": "calendar-us-v1",
+        "calendar_available_at": 预测时点,
+        "feature_available_at": 预测时点,
+        "feature_cutoff_at": 预测时点,
         "model_version": "baseline-v1",
         "is_current_data_available": True,
     }
@@ -93,26 +102,30 @@ def 到期结果(
     收益率: Decimal | None,
     日历: TradingCalendar,
     到期价格可得时点: datetime | None,
-    标签规则版本: str = "prediction-label-v1",
+    标签规则: PredictionLabelRule = 规则_v1,
+    传入到期日: date | None = None,
+    传入日历版本: str | None = None,
+    解析日历: TradingCalendar | None = None,
 ):
     """仅在到期验证阶段建立独立实际结果；此处允许价格晚于预测时点可得。"""
 
-    到期日 = 到期交易日(周期, 日历)
+    到期日 = 传入到期日 or 到期交易日(周期, 日历)
+    日历事实 = 解析日历 or 日历
     return resolve_actual_outcome(
         prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
         prediction_time=预测时点,
         horizon_trading_days=周期,
         reference_trading_day=参考交易日,
         expiry_trading_day=到期日,
-        trading_calendar=日历,
-        trading_calendar_version=日历.version_id,
+        trading_calendar=日历事实,
+        trading_calendar_version=传入日历版本 or 日历事实.version_id,
         reference_total_return_adjusted_price=Decimal("100"),
         expiry_total_return_adjusted_price=(
             None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率)
         ),
         expiry_price_available_at=到期价格可得时点,
         validated_at=(到期价格可得时点 or 预测时点) + timedelta(seconds=1),
-        prediction_label_rule_version=标签规则版本,
+        prediction_label_rule=标签规则,
     )
 
 
@@ -139,7 +152,7 @@ def test_到期实际结果按快照规则版本和包含边界分类(周期: in
 
     assert 结果.status is ActualOutcomeStatus.VALIDATED
     assert 结果.label is 预期
-    assert 结果.label_rule_version == "prediction-label-v1"
+    assert 结果.label_rule_version == 规则_v1.version_id
 
 
 @pytest.mark.parametrize("周期", 允许周期)
@@ -169,6 +182,45 @@ def test_周期按非连续市场交易日而非自然日计数(周期: int, 预
 
     assert 到期交易日(周期, 日历) == 预期到期日
     assert 预期到期日 != 参考交易日 + timedelta(days=周期)
+
+
+@pytest.mark.parametrize("周期", 允许周期)
+def test_实际结果解析器拒绝自然日到期日和错日历版本(周期: int) -> None:
+    """公开到期解析器必须自行校验市场交易日序号与日历版本，不能信任调用方。"""
+
+    日历 = 市场日历()
+    可得时点 = 预测时点 + timedelta(days=31)
+
+    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
+        到期结果(
+            周期=周期,
+            收益率=Decimal("0"),
+            日历=日历,
+            到期价格可得时点=可得时点,
+            传入到期日=参考交易日 + timedelta(days=周期),
+        )
+
+    with pytest.raises(PredictionLabelRuleError, match="日历版本|日历"):
+        到期结果(
+            周期=周期,
+            收益率=Decimal("0"),
+            日历=日历,
+            到期价格可得时点=可得时点,
+            传入日历版本="calendar-us-v0",
+        )
+
+    错日历 = 市场日历(
+        tuple(交易日 for 交易日 in 有效交易日 if 交易日 != date(2026, 7, 6)),
+        版本="calendar-us-v2",
+    )
+    with pytest.raises(PredictionLabelRuleError, match="交易日|到期日|日历"):
+        到期结果(
+            周期=周期,
+            收益率=Decimal("0"),
+            日历=日历,
+            解析日历=错日历,
+            到期价格可得时点=可得时点,
+        )
 
 
 @given(st.integers(min_value=-100, max_value=100).filter(lambda 周期: 周期 not in 允许周期))
@@ -205,6 +257,17 @@ def test_预测输入拒绝到期价格且到期回填允许价格晚于预测�
     assert 结果.label is PredictionLabel.UP
 
 
+@pytest.mark.parametrize(
+    "字段",
+    ["calendar_available_at", "feature_available_at", "feature_cutoff_at"],
+)
+def test_预测输入拒绝预测时点后才可得的日历版本或特征事实(字段: str) -> None:
+    """预测输入必须携带日历版本及可得时点、特征和截止时点，且均不得晚于预测时点。"""
+
+    with pytest.raises(CurrentPredictionUnavailableError, match="日历|特征|截止|预测时点|未来"):
+        PredictionInput(**预测输入负载(**{字段: 预测时点 + timedelta(seconds=1)}))
+
+
 def test_缺失有效到期价格保持待验证且不可强行分类() -> None:
     """到期价格缺失必须形成 PENDING_VALIDATION，不能抛错后伪造方向标签。"""
 
@@ -230,18 +293,34 @@ def test_预测输入拒绝预测时点后生效的公司行动() -> None:
         PredictionInput(**预测输入负载(company_actions=(未来行动,)))
 
 
-def test_到期结果沿用快照标签规则版本且不得被新版回写() -> None:
-    """历史预测及其实际结果必须锁定原标签规则版本，不能被后续规则版本覆盖。"""
+def test_到期结果按快照规则阈值分类且不得被新版规则回写() -> None:
+    """同一收益率在 v1/v2 阈值不同；历史实际结果必须使用预测快照捕获的 v1。"""
+
+    规则_v2 = PredictionLabelRule(
+        version_id="prediction-label-v2",
+        thresholds={1: Decimal("0.02"), 5: Decimal("0.04"), 20: Decimal("0.07")},
+    )
+    收益率 = Decimal("0.015")
 
     原结果 = 到期结果(
-        周期=20,
-        收益率=Decimal("0.06"),
+        周期=1,
+        收益率=收益率,
         日历=市场日历(),
         到期价格可得时点=预测时点 + timedelta(days=31),
-        标签规则版本="prediction-label-v1",
+        标签规则=规则_v1,
+    )
+    新规则结果 = 到期结果(
+        周期=1,
+        收益率=收益率,
+        日历=市场日历(),
+        到期价格可得时点=预测时点 + timedelta(days=31),
+        标签规则=规则_v2,
     )
 
-    assert 原结果.label_rule_version == "prediction-label-v1"
+    assert 原结果.label_rule_version == 规则_v1.version_id
+    assert 原结果.label is PredictionLabel.UP
+    assert 新规则结果.label_rule_version == 规则_v2.version_id
+    assert 新规则结果.label is PredictionLabel.FLAT
     with pytest.raises(PredictionLabelRuleError, match="规则版本|回写|不可变"):
         原结果.with_label_rule_version("prediction-label-v2")
 
