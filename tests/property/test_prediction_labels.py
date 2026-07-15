@@ -97,6 +97,7 @@ def 预测输入负载(**覆盖: object) -> dict[str, object]:
         "feature_version": "features-v1",
         "trading_calendar_version": "calendar-us-v1",
         "calendar_available_at": 预测时点,
+        "label_rule_available_at": 预测时点,
         "feature_available_at": 预测时点,
         "feature_cutoff_at": 预测时点,
         "model_version": "baseline-v1",
@@ -127,7 +128,9 @@ def 到期结果(
     )
     验证时点 = max(
         到期价格可得时点 + timedelta(seconds=1),
-        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
+        # 结果验证按证券市场时区判断。美国夏令时下 UTC 次日零点仍是
+        # 到期日本地傍晚，必须进入下一本地日期后才允许形成已验证结果。
+        datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=2),
     )
     到期事实值 = (
         ("REFERENCE_PRICE", "daily-us-v1", Decimal("100")),

@@ -357,8 +357,14 @@ def quantitative_value_hash(field_name: str, value: Decimal | float) -> str:
 
 
 def _require_aware(value: datetime, name: str) -> None:
-    if value.tzinfo is None or value.utcoffset() is None:
+    if not _has_timezone(value):
         raise ValueError(f"{name}必须带时区")
+
+
+def _has_timezone(value: datetime) -> bool:
+    """判断时点是否可比较，避免无时区时间混入跨市场时序判断。"""
+
+    return value.tzinfo is not None and value.utcoffset() is not None
 
 
 def _security_market(security_id: object) -> str | None:
@@ -502,6 +508,7 @@ class PredictionInput(BaseModel):
     feature_version: str
     trading_calendar_version: str | None = None
     calendar_available_at: datetime | None = None
+    label_rule_available_at: datetime | None = None
     feature_available_at: datetime | None = None
     feature_cutoff_at: datetime | None = None
     model_version: str
@@ -524,12 +531,23 @@ class PredictionInput(BaseModel):
                     "延迟、过期或闭市行情不可用于当前预测"
                 ) from exc
             predicted_at = data.get("predicted_at")
-            if isinstance(predicted_at, datetime) and any(
-                isinstance(data.get(field), datetime) and data[field] > predicted_at
-                for field in ("calendar_available_at", "feature_available_at", "feature_cutoff_at")
+            if (
+                isinstance(predicted_at, datetime)
+                and _has_timezone(predicted_at)
+                and any(
+                    isinstance(data.get(field), datetime)
+                    and _has_timezone(data[field])
+                    and data[field] > predicted_at
+                    for field in (
+                        "calendar_available_at",
+                        "label_rule_available_at",
+                        "feature_available_at",
+                        "feature_cutoff_at",
+                    )
+                )
             ):
                 raise CurrentPredictionUnavailableError(
-                    "日历、特征或截止事实在预测时点后才可得"
+                    "日历、标签规则、特征或截止事实在预测时点后才可得"
                 ) from exc
             if isinstance(predicted_at, datetime) and any(
                 action.effective_at > predicted_at
@@ -582,14 +600,18 @@ class PredictionInput(BaseModel):
             raise CurrentPredictionUnavailableError("市场时间不可验证，当前预测不可用")
         if self.freshness not in {"REALTIME", "NEAR_REALTIME"}:
             raise CurrentPredictionUnavailableError("延迟、过期或闭市行情不可用于当前预测")
-        for label, value in (
-            ("日历", self.calendar_available_at),
-            ("特征", self.feature_available_at),
-            ("特征截止", self.feature_cutoff_at),
+        for label, value, required in (
+            ("日历", self.calendar_available_at, True),
+            ("标签规则", self.label_rule_available_at, True),
+            ("特征", self.feature_available_at, False),
+            ("特征截止", self.feature_cutoff_at, False),
         ):
-            if value is not None:
-                _require_aware(value, f"{label}可得时点")
-            if value is not None and value > self.predicted_at:
+            if value is None:
+                if required:
+                    raise CurrentPredictionUnavailableError(f"{label}可得时点必须存在")
+                continue
+            _require_aware(value, f"{label}可得时点")
+            if value > self.predicted_at:
                 raise CurrentPredictionUnavailableError(f"{label}在预测时点后才可得")
         for action in self.company_actions:
             if (
@@ -729,9 +751,9 @@ class PredictionLabelRule(BaseModel):
     @model_validator(mode="after")
     def validate_thresholds(self) -> PredictionLabelRule:
         if set(self.thresholds) != _HORIZONS or any(
-            value <= 0 for value in self.thresholds.values()
+            not value.is_finite() or value <= 0 for value in self.thresholds.values()
         ):
-            raise PredictionLabelRuleError("标签规则必须包含 1、5、20 日的正阈值")
+            raise PredictionLabelRuleError("标签规则必须包含 1、5、20 日的有限正阈值")
         return self
 
 
@@ -866,6 +888,8 @@ def resolve_actual_outcome(
         (label_rule_available_at, "规则可得时点"),
         (company_actions_available_at, "公司行动可得时点"),
     ):
+        if value is not None:
+            _require_aware(value, name)
         if value is not None and value > validated_at:
             return _pending_outcome(
                 prediction_snapshot_id,
@@ -959,7 +983,7 @@ def resolve_actual_outcome(
         or not trading_calendar.is_trading_day(reference_trading_day)
         or expiry_total_return_adjusted_price is None
         or expiry_price_available_at is None
-        or validated_at.date() <= expiry_trading_day
+        or _market_date(validated_at, security_id, trading_calendar.market) <= expiry_trading_day
         or expiry_price_available_at is not None
         and expiry_price_available_at.date() < expiry_trading_day
         or any(
@@ -1118,40 +1142,52 @@ class PredictionSnapshotStore:
         trading_calendar: TradingCalendar | None = None,
         prediction_label_rule: PredictionLabelRule | None = None,
     ) -> PredictionSnapshot:
+        try:
+            # security_id 和公司行动是领域不可变对象；model_dump 会把它们降为
+            # 普通字典，既破坏证券身份比较，也不能代表调用方已通过的边界校验。
+            # 其余字段仍经由新建模型复验，阻止 model_copy 绕过可得时点门禁。
+            input_payload = prediction_input.model_dump()
+            input_payload["security_id"] = prediction_input.security_id
+            input_payload["company_actions"] = prediction_input.company_actions
+            verified_input = PredictionInput(**input_payload)
+        except (ValidationError, ValueError) as exc:
+            raise ImmutablePredictionSnapshotError(
+                "快照日历或标签规则可得时点不满足预测时点门禁"
+            ) from exc
         if snapshot_id in self._snapshots:
             raise ImmutablePredictionSnapshotError("预测快照只能追加，不能覆盖")
-        if prediction_input.predicted_at != prediction_output.predicted_at:
+        if verified_input.predicted_at != prediction_output.predicted_at:
             raise ImmutablePredictionSnapshotError("快照输入输出预测时点必须一致")
-        if prediction_input.security_id != prediction_output.security_id:
+        if verified_input.security_id != prediction_output.security_id:
             raise ImmutablePredictionSnapshotError("快照输入输出证券必须一致")
         if any(
             left != right
             for left, right in (
-                (prediction_input.data_version, prediction_output.data_version),
-                (prediction_input.feature_version, prediction_output.feature_version),
-                (prediction_input.model_version, prediction_output.model_version),
+                (verified_input.data_version, prediction_output.data_version),
+                (verified_input.feature_version, prediction_output.feature_version),
+                (verified_input.model_version, prediction_output.model_version),
                 (
-                    prediction_input.prediction_label_rule_version,
+                    verified_input.prediction_label_rule_version,
                     prediction_output.label_rule_version,
                 ),
-                (prediction_input.freshness, prediction_output.freshness),
+                (verified_input.freshness, prediction_output.freshness),
             )
         ):
             raise ImmutablePredictionSnapshotError("快照输入输出版本或新鲜度必须一致")
         if trading_calendar is None or prediction_label_rule is None:
             raise ImmutablePredictionSnapshotError("快照日历与标签规则必须同时绑定")
         if (
-            trading_calendar.version_id != prediction_input.trading_calendar_version
-            or prediction_label_rule.version_id != prediction_input.prediction_label_rule_version
+            trading_calendar.version_id != verified_input.trading_calendar_version
+            or prediction_label_rule.version_id != verified_input.prediction_label_rule_version
         ):
             raise ImmutablePredictionSnapshotError("快照日历或标签规则版本必须与预测输入一致")
-        if trading_calendar.market != _security_market(prediction_input.security_id):
+        if trading_calendar.market != _security_market(verified_input.security_id):
             raise ImmutablePredictionSnapshotError("快照日历市场必须与证券一致")
         snapshot = PredictionSnapshot(
             snapshot_id,
-            prediction_input.model_copy(deep=True),
+            verified_input.model_copy(deep=True),
             prediction_output.model_copy(deep=True),
-            prediction_input.predicted_at,
+            verified_input.predicted_at,
             (outcome_fact_value("TRADING_CALENDAR", trading_calendar)),
             (outcome_fact_value("LABEL_RULE", prediction_label_rule)),
         )

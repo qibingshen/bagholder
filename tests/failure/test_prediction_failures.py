@@ -60,6 +60,7 @@ def 有效预测输入(**覆盖: object) -> PredictionInput:
         "feature_version": "features-v1",
         "trading_calendar_version": "calendar-us-v1",
         "calendar_available_at": 预测时点,
+        "label_rule_available_at": 预测时点,
         "feature_available_at": 预测时点,
         "feature_cutoff_at": 预测时点,
         "model_version": "baseline-v1",

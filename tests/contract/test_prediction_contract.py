@@ -59,6 +59,7 @@ def 完整预测输入() -> dict[str, object]:
         "model_version": "baseline-v1",
         "trading_calendar_version": "calendar-us-v1",
         "calendar_available_at": market_time,
+        "label_rule_available_at": market_time,
         "prediction_label_rule_version": "prediction-label-v1",
         "is_current_data_available": True,
     }

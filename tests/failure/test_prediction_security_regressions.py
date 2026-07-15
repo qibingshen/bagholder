@@ -18,6 +18,7 @@ from stock_agent.domain.prediction import (
     PredictionInput,
     PredictionLabel,
     PredictionLabelRule,
+    PredictionLabelRuleError,
     PredictionOutput,
     PredictionSnapshotStore,
     QuantitativeFactReference,
@@ -51,6 +52,7 @@ def _输入(**覆盖: object) -> PredictionInput:
         "feature_version": "feature-v1",
         "trading_calendar_version": "calendar-us-v1",
         "calendar_available_at": 时间,
+        "label_rule_available_at": 时间,
         "feature_available_at": 时间,
         "feature_cutoff_at": 时间,
         "model_version": "baseline-v1",
@@ -369,6 +371,57 @@ def test_预测输入拒绝未枚举的新鲜度值() -> None:
         _输入(freshness="MAYBE_CURRENT")
 
 
+@pytest.mark.parametrize("字段", ["calendar_available_at", "label_rule_available_at"])
+@pytest.mark.parametrize(
+    "值",
+    [None, datetime(2026, 7, 14, 9, 30)],
+)
+def test_预测输入要求日历和标签规则具有预测前的带时区可得时点(
+    字段: str, 值: datetime | None
+) -> None:
+    """日历和标签规则都是预测事实，缺失或无时区时不能生成当前预测。"""
+
+    with pytest.raises(ValueError, match="日历|规则|可得时点|时区"):
+        _输入(**{字段: 值})
+
+
+@pytest.mark.parametrize("字段", ["calendar_available_at", "label_rule_available_at"])
+def test_预测输入拒绝预测时点后才可得的日历或标签规则(字段: str) -> None:
+    """预测快照不得绑定预测产生后才可得的治理事实。"""
+
+    with pytest.raises(ValueError, match="预测时点|日历|规则"):
+        _输入(**{字段: 时间 + timedelta(seconds=1)})
+
+
+@pytest.mark.parametrize("字段", ["calendar_available_at", "label_rule_available_at"])
+def test_快照追加复验日历和标签规则的可得时点(字段: str) -> None:
+    """调用方绕过输入构造时，追加入口仍须拒绝未来治理事实。"""
+
+    store = PredictionSnapshotStore()
+    unsafe_input = _输入().model_copy(update={字段: 时间 + timedelta(seconds=1)})
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="日历|规则|可得时点|预测时点"):
+        store.append(
+            "snapshot-future-governance-fact",
+            unsafe_input,
+            _输出(),
+            trading_calendar=日历,
+            prediction_label_rule=规则,
+        )
+
+
+@pytest.mark.parametrize("阈值", [Decimal("NaN"), Decimal("Infinity")])
+def test_标签规则拒绝非有限阈值(阈值: Decimal) -> None:
+    """NaN 和无穷阈值不能参与历史标签分类。"""
+
+    # Pydantic 会在领域规则前拒绝非有限 Decimal；两层均须视为安全拒绝。
+    with pytest.raises((PredictionLabelRuleError, ValidationError)):
+        PredictionLabelRule(
+            version_id="invalid-label-rule",
+            thresholds={1: 阈值, 5: Decimal("0.03"), 20: Decimal("0.06")},
+        )
+
+
 def test_量化事实引用必须具有结构化工具审计锚点() -> None:
     """仅有自由文本和值哈希不足以证明数字来自本地或 MCP 工具。"""
 
@@ -438,10 +491,11 @@ def _完整到期事实(
     reference_market_time: datetime = 时间,
     expiry_market_time: datetime = 时间 + timedelta(days=1),
     include_tradability: bool = True,
+    validated_at: datetime | None = None,
 ) -> tuple[object, ...]:
     """构造由内置本地审计服务签发的最小完整到期事实。"""
 
-    validated_at = 时间 + timedelta(days=2)
+    validated_at = validated_at or 时间 + timedelta(days=2)
     values = {
         "REFERENCE_PRICE": Decimal("100"),
         "EXPIRY_PRICE": Decimal("101"),
@@ -530,6 +584,25 @@ def _已验证到期结果(*, snapshot_id: str, **overrides: object) -> ActualOu
     }
     payload.update(overrides)
     return resolve_actual_outcome(**payload)
+
+
+def test_到期日按证券市场本地日期判断而非_utc_日期() -> None:
+    """美国市场在到期日当地收盘前不能因 UTC 已跨日而提前验证。"""
+
+    验证时点 = datetime(2026, 7, 16, 1, 0, tzinfo=UTC)
+    到期价格时点 = datetime(2026, 7, 15, 9, 30, tzinfo=UTC)
+    outcome = _已验证到期结果(
+        snapshot_id="snapshot-local-expiry-boundary",
+        expiry_price_available_at=到期价格时点,
+        validated_at=验证时点,
+        outcome_fact_references=_完整到期事实(
+            snapshot_id="snapshot-local-expiry-boundary",
+            expiry_market_time=到期价格时点,
+            validated_at=验证时点,
+        ),
+    )
+
+    assert outcome.status is ActualOutcomeStatus.PENDING_VALIDATION
 
 
 def test_缺少两端可交易状态事实的结果不得验证() -> None:
