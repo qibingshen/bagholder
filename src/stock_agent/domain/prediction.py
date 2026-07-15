@@ -7,6 +7,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
+from json import dumps
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -69,6 +70,9 @@ class QuantitativeFactReference(BaseModel):
     tool_version: str
     called_at: datetime
     data_as_of: datetime
+    market_time: datetime
+    collected_at: datetime
+    available_at: datetime
     result_anchor: str
     source_id: str
     security_id: object
@@ -98,10 +102,24 @@ class QuantitativeFactReference(BaseModel):
         ):
             raise ValueError("事实引用必须包含非空且已指定的标识与版本")
         _require_aware(self.prediction_time, "事实引用预测时点")
-        for value, name in ((self.called_at, "工具调用时点"), (self.data_as_of, "数据时点")):
+        for value, name in (
+            (self.market_time, "市场时点"),
+            (self.collected_at, "采集时点"),
+            (self.available_at, "可得时点"),
+            (self.data_as_of, "数据时点"),
+            (self.called_at, "工具调用时点"),
+        ):
             _require_aware(value, name)
             if value > self.prediction_time:
                 raise ValueError(f"{name}不得晚于预测时点")
+        if not (
+            self.market_time
+            <= self.collected_at
+            <= self.available_at
+            <= self.data_as_of
+            <= self.called_at
+        ):
+            raise ValueError("量化事实必须按市场、采集、可得、数据和调用时点排序")
         if not all(
             isinstance(value, str) and value.strip()
             for value in (self.tool_name, self.tool_version, self.result_anchor)
@@ -144,6 +162,9 @@ class OutcomeFactReference(BaseModel):
     fact_type: Literal[
         "REFERENCE_PRICE", "EXPIRY_PRICE", "COMPANY_ACTIONS", "TRADING_CALENDAR", "LABEL_RULE"
     ]
+    security_id: object
+    prediction_snapshot_id: str
+    prediction_time: datetime
     reference_type: Literal["MCP", "LOCAL"]
     source_id: str
     tool_name: str
@@ -179,6 +200,11 @@ class OutcomeFactReference(BaseModel):
             (self.available_at, "可得时点"),
         ):
             _require_aware(value, name)
+        _require_aware(self.prediction_time, "到期事实预测时点")
+        if self.security_id is None or not self.prediction_snapshot_id.strip():
+            raise ValueError("到期事实必须绑定目标证券和预测快照")
+        if not self.market_time <= self.collected_at <= self.available_at:
+            raise ValueError("到期事实必须按市场、采集和可得时点排序")
         expected = "local://" if self.reference_type == "LOCAL" else "mcp://"
         if not self.result_anchor.startswith(expected):
             raise ValueError("到期事实结果锚定必须与 LOCAL/MCP 来源一致")
@@ -186,6 +212,79 @@ class OutcomeFactReference(BaseModel):
         if self.value_hash != expected_hash:
             raise ValueError("到期事实值哈希不匹配")
         return self
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    """以稳定文本绑定价格事实，避免同值的展示格式影响审计。"""
+    return format(value.normalize(), "f")
+
+
+def _calendar_fact_value(calendar: TradingCalendar) -> str:
+    """为交易日历生成稳定摘要，防止同版本下替换日历内容。"""
+    return dumps(
+        {
+            "market": calendar.market,
+            "version_id": calendar.version_id,
+            "trading_days": [day.isoformat() for day in sorted(calendar.trading_days)],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _label_rule_fact_value(rule: PredictionLabelRule) -> str:
+    """为标签规则生成稳定摘要，防止复用版本名篡改阈值。"""
+    return dumps(
+        {
+            "version_id": rule.version_id,
+            "thresholds": {
+                str(day): _canonical_decimal(value) for day, value in rule.thresholds.items()
+            },
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _company_actions_fact_value(actions: tuple[CompanyAction, ...]) -> str:
+    """为行动集合生成稳定摘要，确保集合和每项行动都未被替换。"""
+    return dumps(
+        [
+            {
+                "action_id": action.action_id,
+                "action_type": action.action_type,
+                "effective_at": action.effective_at.isoformat(),
+                "available_at": action.available_at.isoformat() if action.available_at else None,
+                "version_id": action.version_id,
+                "source_id": action.source_id,
+                "adjustment_ratio": str(action.adjustment_ratio),
+                "security_id": str(action.security_id),
+                "market": action.market.value if action.market else None,
+            }
+            for action in sorted(actions, key=lambda item: item.action_id)
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def outcome_fact_value(
+    fact_type: str,
+    value: Decimal | TradingCalendar | PredictionLabelRule | tuple[CompanyAction, ...],
+) -> str:
+    """构造到期事实的稳定值，供本地存储和 MCP 适配器写入审计引用。"""
+    if fact_type in {"REFERENCE_PRICE", "EXPIRY_PRICE"} and isinstance(value, Decimal):
+        return _canonical_decimal(value)
+    if fact_type == "TRADING_CALENDAR" and isinstance(value, TradingCalendar):
+        return _calendar_fact_value(value)
+    if fact_type == "LABEL_RULE" and isinstance(value, PredictionLabelRule):
+        return _label_rule_fact_value(value)
+    if fact_type == "COMPANY_ACTIONS" and isinstance(value, tuple):
+        return _company_actions_fact_value(value)
+    raise ValueError("到期事实类型和值不匹配")
 
 
 def quantitative_value_hash(field_name: str, value: Decimal | float) -> str:
@@ -484,6 +583,8 @@ def resolve_actual_outcome(
     company_actions: tuple[CompanyAction, ...] = (),
     company_actions_available_at: datetime | None = None,
     outcome_fact_references: tuple[OutcomeFactReference, ...] = (),
+    security_id: object | None = None,
+    price_data_version: str | None = None,
 ) -> ActualOutcome:
     """独立解析到期事实；缺价或无效到期日仅形成待验证结果。"""
     for name, value in (("预测时点", prediction_time), ("验证时点", validated_at)):
@@ -522,8 +623,44 @@ def resolve_actual_outcome(
     if company_actions:
         required_fact_types.add("COMPANY_ACTIONS")
     provided_fact_types = {reference.fact_type for reference in outcome_fact_references}
-    if any(reference.available_at > validated_at for reference in outcome_fact_references):
-        raise PredictionLabelRuleError("到期事实可得时点晚于验证边界")
+    facts_by_type = {reference.fact_type: reference for reference in outcome_fact_references}
+    facts_are_bound = (
+        security_id is not None
+        and bool(price_data_version)
+        and len(facts_by_type) == len(outcome_fact_references)
+        and all(
+            reference.security_id == security_id
+            and reference.prediction_snapshot_id == prediction_snapshot_id
+            and reference.prediction_time == prediction_time
+            and reference.available_at <= validated_at
+            for reference in outcome_fact_references
+        )
+        and facts_by_type.get("REFERENCE_PRICE") is not None
+        and facts_by_type.get("EXPIRY_PRICE") is not None
+        and facts_by_type.get("TRADING_CALENDAR") is not None
+        and facts_by_type.get("LABEL_RULE") is not None
+        and facts_by_type["REFERENCE_PRICE"].version_id == price_data_version
+        and facts_by_type["EXPIRY_PRICE"].version_id == price_data_version
+        and facts_by_type["REFERENCE_PRICE"].fact_value
+        == outcome_fact_value("REFERENCE_PRICE", reference_total_return_adjusted_price)
+        and expiry_total_return_adjusted_price is not None
+        and facts_by_type["EXPIRY_PRICE"].fact_value
+        == outcome_fact_value("EXPIRY_PRICE", expiry_total_return_adjusted_price)
+        and facts_by_type["TRADING_CALENDAR"].version_id == trading_calendar.version_id
+        and facts_by_type["TRADING_CALENDAR"].fact_value
+        == outcome_fact_value("TRADING_CALENDAR", trading_calendar)
+        and facts_by_type["LABEL_RULE"].version_id == prediction_label_rule.version_id
+        and facts_by_type["LABEL_RULE"].fact_value
+        == outcome_fact_value("LABEL_RULE", prediction_label_rule)
+        and (
+            not company_actions
+            or (
+                facts_by_type.get("COMPANY_ACTIONS") is not None
+                and facts_by_type["COMPANY_ACTIONS"].fact_value
+                == outcome_fact_value("COMPANY_ACTIONS", company_actions)
+            )
+        )
+    )
     if (
         not trading_calendar.is_trading_day(expiry_trading_day)
         or not trading_calendar.is_trading_day(reference_trading_day)
@@ -531,6 +668,7 @@ def resolve_actual_outcome(
         or expiry_price_available_at is None
         or validated_at.date() <= expiry_trading_day
         or not required_fact_types.issubset(provided_fact_types)
+        or not facts_are_bound
         or not reference_total_return_adjusted_price.is_finite()
         or reference_total_return_adjusted_price <= 0
         or (
@@ -554,7 +692,7 @@ def resolve_actual_outcome(
             None,
             prediction_label_rule.version_id,
             pending_reason,
-            tuple(outcome_fact_references),
+            (),
         )
     days = sorted(trading_calendar.trading_days)
     if days.index(expiry_trading_day) != days.index(reference_trading_day) + horizon_trading_days:
@@ -666,6 +804,26 @@ class PredictionSnapshotStore:
             raise ImmutablePredictionSnapshotError("到期结果日历版本必须与快照一致")
         if outcome.label_rule_version != snapshot.prediction_input.prediction_label_rule_version:
             raise ImmutablePredictionSnapshotError("到期结果规则版本必须与快照一致")
+        if outcome.status is not ActualOutcomeStatus.VALIDATED or not outcome.fact_references:
+            raise ImmutablePredictionSnapshotError("只有已验证且绑定事实引用的到期结果可以持久化")
+        if any(
+            reference.security_id != snapshot.prediction_input.security_id
+            or reference.prediction_snapshot_id != outcome.prediction_snapshot_id
+            or reference.prediction_time != outcome.prediction_time
+            or reference.version_id == "UNSPECIFIED"
+            for reference in outcome.fact_references
+        ):
+            raise ImmutablePredictionSnapshotError("到期事实必须与快照证券、时点和版本绑定")
+        price_references = tuple(
+            reference
+            for reference in outcome.fact_references
+            if reference.fact_type in {"REFERENCE_PRICE", "EXPIRY_PRICE"}
+        )
+        if len(price_references) != 2 or any(
+            reference.version_id != snapshot.prediction_input.data_version
+            for reference in price_references
+        ):
+            raise ImmutablePredictionSnapshotError("到期价格事实数据版本必须与预测快照一致")
         stored = ActualOutcome(**outcome.__dict__)
         self._outcomes.setdefault(outcome.prediction_snapshot_id, []).append(stored)
         return stored

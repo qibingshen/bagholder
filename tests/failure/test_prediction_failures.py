@@ -2,6 +2,7 @@
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 from pydantic import ValidationError
@@ -12,6 +13,7 @@ from stock_agent.domain.prediction import (
     ActualOutcomeStatus,
     CurrentPredictionUnavailableError,
     ImmutablePredictionSnapshotError,
+    OutcomeFactReference,
     PredictionInput,
     PredictionLabelRule,
     PredictionLabelRuleError,
@@ -19,6 +21,7 @@ from stock_agent.domain.prediction import (
     PredictionSnapshotStore,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
+    outcome_fact_value,
     quantitative_value_hash,
     resolve_actual_outcome,
 )
@@ -100,6 +103,9 @@ def 有效预测输出(**覆盖: object) -> PredictionOutput:
             tool_version="v1",
             called_at=预测时点,
             data_as_of=预测时点,
+            market_time=预测时点,
+            collected_at=预测时点,
+            available_at=预测时点,
             result_anchor=f"local://facts/{负载['data_version']}:NASDAQ:AAPL:{字段}",
             source_id="local-verified-bars",
             security_id=证券,
@@ -126,7 +132,7 @@ def 有效预测输出(**覆盖: object) -> PredictionOutput:
 def 有效到期结果(**覆盖: object):
     """构造可独立追加的到期结果；其事实必须能追溯到预测快照。"""
 
-    验证时点 = 预测时点 + timedelta(days=1)
+    验证时点 = 预测时点 + timedelta(days=8)
     负载: dict[str, object] = {
         "prediction_snapshot_id": "prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
         "prediction_time": 预测时点,
@@ -148,6 +154,44 @@ def 有效到期结果(**覆盖: object):
         "company_actions_available_at": 验证时点,
     }
     负载.update(覆盖)
+    到期事实值 = {
+        "REFERENCE_PRICE": 负载["reference_total_return_adjusted_price"],
+        "EXPIRY_PRICE": 负载["expiry_total_return_adjusted_price"],
+        "TRADING_CALENDAR": 负载["trading_calendar"],
+        "LABEL_RULE": 负载["prediction_label_rule"],
+    }
+    到期事实版本 = {
+        "REFERENCE_PRICE": "daily-us-v1",
+        "EXPIRY_PRICE": "daily-us-v1",
+        "TRADING_CALENDAR": 负载["trading_calendar_version"],
+        "LABEL_RULE": 负载["prediction_label_rule"].version_id,
+    }
+    if all(value is not None for value in 到期事实值.values()):
+        负载["outcome_fact_references"] = tuple(
+            OutcomeFactReference(
+                fact_type=事实类型,
+                security_id=证券,
+                prediction_snapshot_id=str(负载["prediction_snapshot_id"]),
+                prediction_time=预测时点,
+                reference_type="LOCAL",
+                source_id="local-verified-history",
+                tool_name="local_fact_store",
+                tool_version="v1",
+                market_time=验证时点,
+                collected_at=验证时点,
+                available_at=验证时点,
+                version_id=str(到期事实版本[事实类型]),
+                result_id=f"{事实类型}:{到期事实版本[事实类型]}",
+                result_anchor=f"local://outcomes/{事实类型}:{到期事实版本[事实类型]}",
+                fact_value=outcome_fact_value(事实类型, 到期事实值[事实类型]),
+                value_hash=sha256(
+                    f"{事实类型}:{outcome_fact_value(事实类型, 到期事实值[事实类型])}".encode()
+                ).hexdigest(),
+            )
+            for 事实类型 in ("REFERENCE_PRICE", "EXPIRY_PRICE", "TRADING_CALENDAR", "LABEL_RULE")
+        )
+        负载["security_id"] = 证券
+        负载["price_data_version"] = "daily-us-v1"
     return resolve_actual_outcome(**负载)
 
 
@@ -305,19 +349,19 @@ def _公司行动(可得时点: datetime) -> CompanyAction:
     [
         (
             "价格可得时点晚于验证边界",
-            {"expiry_price_available_at": 预测时点 + timedelta(days=1, seconds=1)},
+            {"expiry_price_available_at": 预测时点 + timedelta(days=8, seconds=1)},
         ),
         (
             "公司行动可得时点晚于验证边界",
-            {"company_actions": (_公司行动(预测时点 + timedelta(days=1, seconds=1)),)},
+            {"company_actions": (_公司行动(预测时点 + timedelta(days=8, seconds=1)),)},
         ),
         (
             "交易日历可得时点晚于验证边界",
-            {"calendar_available_at": 预测时点 + timedelta(days=1, seconds=1)},
+            {"calendar_available_at": 预测时点 + timedelta(days=8, seconds=1)},
         ),
         (
             "标签规则可得时点晚于验证边界",
-            {"label_rule_available_at": 预测时点 + timedelta(days=1, seconds=1)},
+            {"label_rule_available_at": 预测时点 + timedelta(days=8, seconds=1)},
         ),
         ("交易日历版本与快照不匹配", {"trading_calendar_version": "calendar-us-v2"}),
         (

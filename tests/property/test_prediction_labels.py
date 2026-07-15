@@ -19,6 +19,7 @@ from stock_agent.domain.prediction import (
     PredictionLabel,
     PredictionLabelRule,
     PredictionLabelRuleError,
+    outcome_fact_value,
     resolve_actual_outcome,
     validate_prediction_probabilities,
 )
@@ -124,9 +125,22 @@ def 到期结果(
         (到期价格可得时点 or 预测时点) + timedelta(seconds=1),
         datetime.combine(到期日, datetime.min.time(), tzinfo=UTC) + timedelta(days=1),
     )
+    到期事实值 = (
+        ("REFERENCE_PRICE", "daily-us-v1", Decimal("100")),
+        (
+            "EXPIRY_PRICE",
+            "daily-us-v1",
+            None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率),
+        ),
+        ("TRADING_CALENDAR", 日历事实.version_id, 日历事实),
+        ("LABEL_RULE", 标签规则.version_id, 标签规则),
+    )
     到期事实 = tuple(
         OutcomeFactReference(
             fact_type=事实类型,
+            security_id="US:NASDAQ:AAPL",
+            prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
+            prediction_time=预测时点,
             reference_type="LOCAL",
             source_id="local-verified-history",
             tool_name="local_fact_store",
@@ -137,15 +151,13 @@ def 到期结果(
             version_id=版本,
             result_id=f"{事实类型}:{版本}",
             result_anchor=f"local://outcomes/{事实类型}:{版本}",
-            fact_value=f"{事实类型}:{版本}",
-            value_hash=sha256(f"{事实类型}:{事实类型}:{版本}".encode()).hexdigest(),
+            fact_value=outcome_fact_value(事实类型, 值),
+            value_hash=sha256(
+                f"{事实类型}:{outcome_fact_value(事实类型, 值)}".encode()
+            ).hexdigest(),
         )
-        for 事实类型, 版本 in (
-            ("REFERENCE_PRICE", "daily-us-v1"),
-            ("EXPIRY_PRICE", "daily-us-v1"),
-            ("TRADING_CALENDAR", 日历事实.version_id),
-            ("LABEL_RULE", 标签规则.version_id),
-        )
+        for 事实类型, 版本, 值 in 到期事实值
+        if 值 is not None
     )
     return resolve_actual_outcome(
         prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
@@ -163,6 +175,8 @@ def 到期结果(
         validated_at=验证时点,
         prediction_label_rule=标签规则,
         outcome_fact_references=到期事实,
+        security_id="US:NASDAQ:AAPL",
+        price_data_version="daily-us-v1",
     )
 
 

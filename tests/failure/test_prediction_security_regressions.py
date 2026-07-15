@@ -18,6 +18,7 @@ from stock_agent.domain.prediction import (
     PredictionSnapshotStore,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
+    outcome_fact_value,
     quantitative_value_hash,
     resolve_actual_outcome,
 )
@@ -69,6 +70,9 @@ def _引用(field: str) -> QuantitativeFactReference:
         tool_version="v1",
         called_at=时间,
         data_as_of=时间,
+        market_time=时间,
+        collected_at=时间,
+        available_at=时间,
         result_anchor=f"local://facts/fact-{field}",
         source_id="local-bars",
         security_id=证券,
@@ -188,9 +192,24 @@ def test_到期结果保存完整的结构化事实引用() -> None:
     """已验证结果必须持久保留价格、日历与规则的事实来源。"""
 
     validated_at = 时间 + timedelta(days=2)
+    values = {
+        "REFERENCE_PRICE": Decimal("100"),
+        "EXPIRY_PRICE": Decimal("101"),
+        "TRADING_CALENDAR": 日历,
+        "LABEL_RULE": 规则,
+    }
+    versions = {
+        "REFERENCE_PRICE": "daily-v1",
+        "EXPIRY_PRICE": "daily-v1",
+        "TRADING_CALENDAR": "calendar-us-v1",
+        "LABEL_RULE": "label-v1",
+    }
     facts = tuple(
         OutcomeFactReference(
             fact_type=fact_type,
+            security_id=证券,
+            prediction_snapshot_id="snapshot-facts",
+            prediction_time=时间,
             reference_type="LOCAL",
             source_id="local-history",
             tool_name="local_fact_store",
@@ -198,11 +217,13 @@ def test_到期结果保存完整的结构化事实引用() -> None:
             market_time=validated_at,
             collected_at=validated_at,
             available_at=validated_at,
-            version_id="daily-v1" if "PRICE" in fact_type else "calendar-us-v1",
+            version_id=versions[fact_type],
             result_id=f"result-{fact_type}",
             result_anchor=f"local://outcomes/result-{fact_type}",
-            fact_value=f"{fact_type}:daily-v1",
-            value_hash=sha256(f"{fact_type}:{fact_type}:daily-v1".encode()).hexdigest(),
+            fact_value=outcome_fact_value(fact_type, values[fact_type]),
+            value_hash=sha256(
+                f"{fact_type}:{outcome_fact_value(fact_type, values[fact_type])}".encode()
+            ).hexdigest(),
         )
         for fact_type in ("REFERENCE_PRICE", "EXPIRY_PRICE", "TRADING_CALENDAR", "LABEL_RULE")
     )
@@ -220,6 +241,8 @@ def test_到期结果保存完整的结构化事实引用() -> None:
         validated_at=validated_at,
         prediction_label_rule=规则,
         outcome_fact_references=facts,
+        security_id=证券,
+        price_data_version="daily-v1",
     )
     assert outcome.status is ActualOutcomeStatus.VALIDATED
     assert outcome.fact_references == facts
