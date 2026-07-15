@@ -317,7 +317,11 @@ def _company_actions_fact_value(actions: tuple[CompanyAction, ...]) -> str:
                 "available_at": action.available_at.isoformat() if action.available_at else None,
                 "version_id": action.version_id,
                 "source_id": action.source_id,
-                "adjustment_ratio": str(action.adjustment_ratio),
+                "adjustment_ratio": (
+                    _canonical_decimal(action.adjustment_ratio)
+                    if action.adjustment_ratio is not None
+                    else None
+                ),
                 "security_id": str(action.security_id),
                 "market": action.market.value if action.market else None,
             }
@@ -770,8 +774,10 @@ def resolve_actual_outcome(
     prediction_label_rule: PredictionLabelRule,
     pending_reason: str | None = None,
     snapshot_trading_calendar_version: str | None = None,
+    snapshot_trading_calendar_fact_value: str | None = None,
     calendar_available_at: datetime | None = None,
     snapshot_label_rule_version: str | None = None,
+    snapshot_label_rule_fact_value: str | None = None,
     label_rule_available_at: datetime | None = None,
     company_actions: tuple[CompanyAction, ...] = (),
     company_actions_available_at: datetime | None = None,
@@ -817,6 +823,42 @@ def resolve_actual_outcome(
             prediction_label_rule.version_id,
             validated_at,
             pending_reason or "规则版本不匹配",
+        )
+    if (
+        snapshot_trading_calendar_fact_value is not None
+        and outcome_fact_value("TRADING_CALENDAR", trading_calendar)
+        != snapshot_trading_calendar_fact_value
+    ):
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "日历内容与预测快照不匹配",
+        )
+    if (
+        snapshot_label_rule_fact_value is not None
+        and outcome_fact_value("LABEL_RULE", prediction_label_rule)
+        != snapshot_label_rule_fact_value
+    ):
+        return _pending_outcome(
+            prediction_snapshot_id,
+            prediction_time,
+            horizon_trading_days,
+            reference_trading_day,
+            expiry_trading_day,
+            trading_calendar_version,
+            reference_total_return_adjusted_price,
+            expiry_total_return_adjusted_price,
+            prediction_label_rule.version_id,
+            validated_at,
+            pending_reason or "规则内容与预测快照不匹配",
         )
     for value, name in (
         (expiry_price_available_at, "价格可得时点"),
@@ -1046,6 +1088,8 @@ class PredictionSnapshot:
     prediction_input: PredictionInput
     prediction_output: PredictionOutput
     generated_at: datetime
+    trading_calendar_fact_value: str | None = None
+    label_rule_fact_value: str | None = None
 
     def display_state_for_current_data(self, freshness: str) -> PredictionDisplayState:
         return (
@@ -1070,6 +1114,9 @@ class PredictionSnapshotStore:
         snapshot_id: str,
         prediction_input: PredictionInput,
         prediction_output: PredictionOutput,
+        *,
+        trading_calendar: TradingCalendar | None = None,
+        prediction_label_rule: PredictionLabelRule | None = None,
     ) -> PredictionSnapshot:
         if snapshot_id in self._snapshots:
             raise ImmutablePredictionSnapshotError("预测快照只能追加，不能覆盖")
@@ -1091,11 +1138,29 @@ class PredictionSnapshotStore:
             )
         ):
             raise ImmutablePredictionSnapshotError("快照输入输出版本或新鲜度必须一致")
+        if (trading_calendar is None) != (prediction_label_rule is None):
+            raise ImmutablePredictionSnapshotError("快照日历与标签规则必须同时绑定")
+        if trading_calendar is not None and (
+            trading_calendar.version_id != prediction_input.trading_calendar_version
+            or prediction_label_rule is None
+            or prediction_label_rule.version_id != prediction_input.prediction_label_rule_version
+        ):
+            raise ImmutablePredictionSnapshotError("快照日历或标签规则版本必须与预测输入一致")
         snapshot = PredictionSnapshot(
             snapshot_id,
             prediction_input.model_copy(deep=True),
             prediction_output.model_copy(deep=True),
             prediction_input.predicted_at,
+            (
+                outcome_fact_value("TRADING_CALENDAR", trading_calendar)
+                if trading_calendar is not None
+                else None
+            ),
+            (
+                outcome_fact_value("LABEL_RULE", prediction_label_rule)
+                if prediction_label_rule is not None
+                else None
+            ),
         )
         self._snapshots[snapshot_id] = snapshot
         return PredictionSnapshot(
@@ -1103,6 +1168,8 @@ class PredictionSnapshotStore:
             snapshot.prediction_input.model_copy(deep=True),
             snapshot.prediction_output.model_copy(deep=True),
             snapshot.generated_at,
+            snapshot.trading_calendar_fact_value,
+            snapshot.label_rule_fact_value,
         )
 
     def append_actual_outcome(self, outcome: ActualOutcome) -> ActualOutcome:
@@ -1119,6 +1186,8 @@ class PredictionSnapshotStore:
             raise ImmutablePredictionSnapshotError("到期结果日历版本必须与快照一致")
         if outcome.label_rule_version != snapshot.prediction_input.prediction_label_rule_version:
             raise ImmutablePredictionSnapshotError("到期结果规则版本必须与快照一致")
+        if snapshot.trading_calendar_fact_value is None or snapshot.label_rule_fact_value is None:
+            raise ImmutablePredictionSnapshotError("预测快照未绑定日历与标签规则内容")
         if outcome.status is not ActualOutcomeStatus.VALIDATED or not outcome.fact_references:
             raise ImmutablePredictionSnapshotError("只有已验证且绑定事实引用的到期结果可以持久化")
         if any(
@@ -1172,6 +1241,17 @@ class PredictionSnapshotStore:
                 raise ValueError("到期事实未由受信签发方签名")
             if any(reference.available_at > outcome.validated_at for reference in rebuilt):
                 raise ValueError("到期事实晚于验证边界")
+            security_id = snapshot.prediction_input.security_id
+            prediction_time = snapshot.prediction_input.predicted_at
+            reference_price_fact = facts["REFERENCE_PRICE"]
+            if (
+                reference_price_fact.market_time > prediction_time
+                or reference_price_fact.collected_at > prediction_time
+                or reference_price_fact.available_at > prediction_time
+            ):
+                raise ValueError("参考价格事实晚于预测时点")
+            if _market_date(outcome.validated_at, security_id) <= outcome.expiry_trading_day:
+                raise ValueError("验证时点必须晚于到期交易日")
             if (
                 facts["REFERENCE_TRADABILITY"].fact_value != "TRADABLE"
                 or facts["EXPIRY_TRADABILITY"].fact_value != "TRADABLE"
@@ -1190,7 +1270,6 @@ class PredictionSnapshotStore:
                 or expiry_price <= 0
             ):
                 raise ValueError("价格事实与到期结果不一致")
-            security_id = snapshot.prediction_input.security_id
             if (
                 _market_date(facts["REFERENCE_PRICE"].market_time, security_id)
                 != outcome.reference_trading_day
@@ -1215,6 +1294,11 @@ class PredictionSnapshotStore:
             rule = _rebuild_label_rule_outcome_fact(
                 facts["LABEL_RULE"].fact_value, expected_version=outcome.label_rule_version
             )
+            if (
+                facts["TRADING_CALENDAR"].fact_value != snapshot.trading_calendar_fact_value
+                or facts["LABEL_RULE"].fact_value != snapshot.label_rule_fact_value
+            ):
+                raise ValueError("日历或规则内容与预测快照不一致")
             actions = _rebuild_company_actions_outcome_fact(
                 facts["COMPANY_ACTIONS"].fact_value,
                 security_id=security_id,

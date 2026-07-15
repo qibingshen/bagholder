@@ -684,3 +684,183 @@ def test_解析器拒绝调用方注入未受信本地签发方() -> None:
             snapshot_id="snapshot-untrusted-issuer",
             fact_issuer=LocalFactIssuer("attacker"),
         )
+
+
+def _重签事实(reference: object, **overrides: object) -> object:
+    """只为仓储边界测试重签受信事实，模拟受信服务的异常输入。"""
+
+    payload = reference.model_dump(exclude={"issuer_id", "issuer_signature"})
+    payload["security_id"] = reference.security_id
+    payload.update(overrides)
+    if "fact_value" in overrides:
+        payload["value_hash"] = sha256(
+            f"{payload['fact_type']}:{payload['fact_value']}".encode()
+        ).hexdigest()
+    return issue_local_outcome_fact(**payload)
+
+
+def test_仓储拒绝预测时点后才可得的参考价格事实() -> None:
+    """受信签名不能把预测完成后才采集的价格伪装成历史参考价。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-reference-future", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-reference-future")
+    future = 时间 + timedelta(minutes=1)
+    forged_facts = tuple(
+        _重签事实(
+            reference,
+            market_time=future,
+            collected_at=future,
+            available_at=future,
+        )
+        if reference.fact_type == "REFERENCE_PRICE"
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(**{**outcome.__dict__, "fact_references": forged_facts})
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def test_仓储拒绝到期交易日尚未结束的已验证结果() -> None:
+    """验证日必须严格晚于到期交易日，不能在到期日盘中提前落库。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-expiry-early", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-expiry-early")
+    early = 时间 + timedelta(days=1)
+    forged_facts = tuple(
+        _重签事实(
+            reference,
+            market_time=early if reference.fact_type != "REFERENCE_PRICE" else 时间,
+            collected_at=early if reference.fact_type != "REFERENCE_PRICE" else 时间,
+            available_at=early if reference.fact_type != "REFERENCE_PRICE" else 时间,
+        )
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(
+        **{**outcome.__dict__, "validated_at": early, "fact_references": forged_facts}
+    )
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def test_仓储拒绝已签名但非规范比例编码的公司行动事实() -> None:
+    """比例文本也是审计事实，数值相等不能替代唯一规范编码。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-action-decimal", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-action-decimal")
+    actions = dumps(
+        [
+            {
+                "action_id": "split-canonical",
+                "action_type": "SPLIT",
+                "effective_at": 时间.isoformat(),
+                "available_at": None,
+                "version_id": "actions-v1",
+                "source_id": "local-history",
+                "adjustment_ratio": "1.0",
+                "security_id": str(证券),
+                "market": "US",
+            }
+        ],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    forged_facts = tuple(
+        _替换已签名事实值(reference, fact_value=actions)
+        if reference.fact_type == "COMPANY_ACTIONS"
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(**{**outcome.__dict__, "fact_references": forged_facts})
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def test_快照以内容摘要拒绝同版本日历替换() -> None:
+    """版本标识相同不代表内容相同；快照必须绑定预测时采用的日历内容。"""
+
+    store = PredictionSnapshotStore()
+    snapshot = store.append(
+        "snapshot-calendar-anchor",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
+    altered_calendar = TradingCalendar(
+        market="US",
+        version_id="calendar-us-v1",
+        trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15), date(2026, 7, 16)}),
+    )
+    resolved = resolve_actual_outcome(
+        prediction_snapshot_id="snapshot-calendar-anchor",
+        prediction_time=时间,
+        horizon_trading_days=1,
+        reference_trading_day=date(2026, 7, 14),
+        expiry_trading_day=date(2026, 7, 15),
+        trading_calendar=altered_calendar,
+        trading_calendar_version="calendar-us-v1",
+        reference_total_return_adjusted_price=Decimal("100"),
+        expiry_total_return_adjusted_price=Decimal("101"),
+        expiry_price_available_at=时间 + timedelta(days=1),
+        validated_at=时间 + timedelta(days=2),
+        prediction_label_rule=规则,
+        snapshot_trading_calendar_version="calendar-us-v1",
+        snapshot_trading_calendar_fact_value=snapshot.trading_calendar_fact_value,
+        snapshot_label_rule_version="label-v1",
+        snapshot_label_rule_fact_value=snapshot.label_rule_fact_value,
+        outcome_fact_references=_完整到期事实(
+            snapshot_id="snapshot-calendar-anchor", calendar=altered_calendar
+        ),
+        security_id=证券,
+        price_data_version="daily-v1",
+    )
+
+    assert resolved.status is ActualOutcomeStatus.PENDING_VALIDATION
+
+
+def test_快照以内容摘要拒绝同版本规则替换() -> None:
+    """同名规则阈值被改写时，到期解析不能沿用预测快照的版本名。"""
+
+    store = PredictionSnapshotStore()
+    snapshot = store.append(
+        "snapshot-rule-anchor",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
+    altered_rule = PredictionLabelRule(
+        version_id="label-v1",
+        thresholds={1: Decimal("0.02"), 5: Decimal("0.03"), 20: Decimal("0.06")},
+    )
+    resolved = resolve_actual_outcome(
+        prediction_snapshot_id="snapshot-rule-anchor",
+        prediction_time=时间,
+        horizon_trading_days=1,
+        reference_trading_day=date(2026, 7, 14),
+        expiry_trading_day=date(2026, 7, 15),
+        trading_calendar=日历,
+        trading_calendar_version="calendar-us-v1",
+        reference_total_return_adjusted_price=Decimal("100"),
+        expiry_total_return_adjusted_price=Decimal("101"),
+        expiry_price_available_at=时间 + timedelta(days=1),
+        validated_at=时间 + timedelta(days=2),
+        prediction_label_rule=altered_rule,
+        snapshot_trading_calendar_version="calendar-us-v1",
+        snapshot_trading_calendar_fact_value=snapshot.trading_calendar_fact_value,
+        snapshot_label_rule_version="label-v1",
+        snapshot_label_rule_fact_value=snapshot.label_rule_fact_value,
+        outcome_fact_references=_完整到期事实(snapshot_id="snapshot-rule-anchor"),
+        security_id=证券,
+        price_data_version="daily-v1",
+    )
+
+    assert resolved.status is ActualOutcomeStatus.PENDING_VALIDATION

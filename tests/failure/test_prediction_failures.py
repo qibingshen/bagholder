@@ -338,7 +338,11 @@ def test_到期结果只能独立追加关联快照且不能改变原快照() ->
 
     store = PredictionSnapshotStore()
     snapshot = store.append(
-        "prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z", 有效预测输入(), 有效预测输出()
+        "prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
+        有效预测输入(),
+        有效预测输出(),
+        trading_calendar=交易日历,
+        prediction_label_rule=标签规则,
     )
     追加前 = (
         snapshot.prediction_output.up_probability,
