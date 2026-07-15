@@ -119,9 +119,8 @@ def test_mcp_分页超时和幂等键边界可检查() -> None:
 def test_mcp_成功结果必须携带工具元数据和数字溯源() -> None:
     """大模型只能引用工具结果中的数字，缺少工具版本、来源或数据版本时必须拒绝。"""
 
-    from stock_agent.mcp.contracts import MCPToolResult
-
     from stock_agent.contracts.common import Freshness, SourceProvenance
+    from stock_agent.mcp.contracts import MCPToolResult
 
     result = MCPToolResult[dict[str, float]](
         contract_version="1.0",
@@ -171,9 +170,8 @@ def test_mcp_成功结果必须携带工具元数据和数字溯源() -> None:
 def test_mcp_预测结果额外要求预测版本和模型版本() -> None:
     """预测工具比普通行情工具多一道版本门禁，防止无法回滚或无法追溯的数字进入解释层。"""
 
-    from stock_agent.mcp.contracts import MCPPredictionToolResult
-
     from stock_agent.contracts.common import Freshness, SourceProvenance
+    from stock_agent.mcp.contracts import MCPPredictionToolResult
 
     result = MCPPredictionToolResult[dict[str, float]](
         contract_version="1.0",
@@ -230,3 +228,17 @@ def test_mcp_预测结果额外要求预测版本和模型版本() -> None:
             model_version="baseline-v1",
             payload={"prob_up": 0.4, "prob_flat": 0.35, "prob_down": 0.25},
         )
+
+
+def test_mcp_server_只允许_stdio_或受控本机传输() -> None:
+    """MCP Server 启动入口不得接受会绕过本机边界的传输类型。"""
+
+    from stock_agent.adapters.mcp.server import MCPServer, MCPServerConfig
+
+    server = MCPServer.create_local_stdio()
+
+    assert server.config.transport == "stdio"
+    assert "prediction.get" in server.tool_names
+
+    with pytest.raises(ValueError):
+        MCPServerConfig(transport="tcp")
