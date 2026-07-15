@@ -16,6 +16,7 @@ from stock_agent.domain.prediction import (
     ImmutablePredictionSnapshotError,
     LocalFactIssuer,
     PredictionInput,
+    PredictionLabel,
     PredictionLabelRule,
     PredictionOutput,
     PredictionSnapshotStore,
@@ -589,6 +590,63 @@ def test_仓储拒绝已签名但复权比例非法的公司行动事实() -> No
         for reference in outcome.fact_references
     )
     forged = ActualOutcome(**{**outcome.__dict__, "fact_references": forged_facts})
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+def test_仓储拒绝已签名的无穷价格事实() -> None:
+    """即使来源签名有效，非有限价格也不能成为可持久化的到期结果。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-infinite-price", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-infinite-price")
+    forged_facts = tuple(
+        _替换已签名事实值(reference, fact_value="Infinity")
+        if reference.fact_type == "REFERENCE_PRICE"
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(
+        **{
+            **outcome.__dict__,
+            "reference_total_return_adjusted_price": Decimal("Infinity"),
+            "label": PredictionLabel.DOWN,
+            "fact_references": forged_facts,
+        }
+    )
+
+    with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
+        store.append_actual_outcome(forged)
+
+
+@pytest.mark.parametrize(
+    ("fact_type", "noncanonical_value"),
+    [("REFERENCE_PRICE", "01.0"), ("EXPIRY_PRICE", "1.00")],
+)
+def test_仓储拒绝已签名但非规范编码的价格事实(fact_type: str, noncanonical_value: str) -> None:
+    """价格事实必须与 Decimal 值的唯一规范文本逐字一致，不能只比较数值相等。"""
+
+    store = PredictionSnapshotStore()
+    store.append("snapshot-price-normalization", _输入(), _输出())
+    outcome = _已验证到期结果(snapshot_id="snapshot-price-normalization")
+    forged_facts = tuple(
+        _替换已签名事实值(reference, fact_value=noncanonical_value)
+        if reference.fact_type == fact_type
+        else _替换已签名事实值(reference, fact_value="1")
+        if reference.fact_type in {"REFERENCE_PRICE", "EXPIRY_PRICE"}
+        else reference
+        for reference in outcome.fact_references
+    )
+    forged = ActualOutcome(
+        **{
+            **outcome.__dict__,
+            "reference_total_return_adjusted_price": Decimal("1"),
+            "expiry_total_return_adjusted_price": Decimal("1"),
+            "label": PredictionLabel.FLAT,
+            "fact_references": forged_facts,
+        }
+    )
 
     with pytest.raises(ImmutablePredictionSnapshotError, match="事实|标签|验证"):
         store.append_actual_outcome(forged)

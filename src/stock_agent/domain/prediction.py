@@ -1180,7 +1180,11 @@ class PredictionSnapshotStore:
             reference_price = Decimal(facts["REFERENCE_PRICE"].fact_value)
             expiry_price = Decimal(facts["EXPIRY_PRICE"].fact_value)
             if (
-                reference_price != outcome.reference_total_return_adjusted_price
+                not reference_price.is_finite()
+                or not expiry_price.is_finite()
+                or facts["REFERENCE_PRICE"].fact_value != _canonical_decimal(reference_price)
+                or facts["EXPIRY_PRICE"].fact_value != _canonical_decimal(expiry_price)
+                or reference_price != outcome.reference_total_return_adjusted_price
                 or expiry_price != outcome.expiry_total_return_adjusted_price
                 or reference_price <= 0
                 or expiry_price <= 0
