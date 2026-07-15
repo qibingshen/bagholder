@@ -1,23 +1,35 @@
 """验证预测输入、输出和不可变快照的量化安全契约。"""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
 from stock_agent.domain.market import InstrumentIdentity, Market
+from stock_agent.domain.market_rules import TradingCalendar
 from stock_agent.domain.prediction import (
     FIXED_RESEARCH_DISCLAIMER,
     CurrentPredictionUnavailableError,
     ImmutablePredictionSnapshotError,
     PredictionDisplayState,
     PredictionInput,
+    PredictionLabelRule,
     PredictionOutput,
     PredictionSnapshotStore,
     QuantitativeFactReference,
     QuantitativeFieldEvidence,
     quantitative_value_hash,
+)
+
+测试日历 = TradingCalendar(
+    market="US",
+    version_id="calendar-us-v1",
+    trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15)}),
+)
+测试标签规则 = PredictionLabelRule(
+    version_id="prediction-label-v1",
+    thresholds={1: Decimal("0.01"), 5: Decimal("0.03"), 20: Decimal("0.06")},
 )
 
 
@@ -45,6 +57,8 @@ def 完整预测输入() -> dict[str, object]:
         "feature_version": "features-v1",
         "source_id": "local-daily-bars",
         "model_version": "baseline-v1",
+        "trading_calendar_version": "calendar-us-v1",
+        "calendar_available_at": market_time,
         "prediction_label_rule_version": "prediction-label-v1",
         "is_current_data_available": True,
     }
@@ -365,6 +379,8 @@ def test_预测快照只允许追加且当前与历史过期展示语义不同()
         snapshot_id="prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
         prediction_input=PredictionInput(**完整预测输入()),
         prediction_output=PredictionOutput(**完整预测输出()),
+        trading_calendar=测试日历,
+        prediction_label_rule=测试标签规则,
     )
 
     with pytest.raises(ImmutablePredictionSnapshotError, match="覆盖"):
@@ -372,6 +388,8 @@ def test_预测快照只允许追加且当前与历史过期展示语义不同()
             snapshot_id=snapshot.snapshot_id,
             prediction_input=PredictionInput(**完整预测输入()),
             prediction_output=PredictionOutput(**完整预测输出()),
+            trading_calendar=测试日历,
+            prediction_label_rule=测试标签规则,
         )
 
     assert (

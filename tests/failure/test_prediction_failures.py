@@ -274,6 +274,8 @@ def test_历史快照在当前数据不可用时仍只读可展示() -> None:
         snapshot_id="prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z",
         prediction_input=有效预测输入(),
         prediction_output=有效预测输出(),
+        trading_calendar=交易日历,
+        prediction_label_rule=标签规则,
     )
 
     assert snapshot.display_state_for_current_data("STALE").value == "CURRENT_UNAVAILABLE"
@@ -324,13 +326,25 @@ def test_已追加预测快照拒绝覆盖概率或任一版本(被篡改字段:
 
     store = PredictionSnapshotStore()
     snapshot_id = "prediction:NASDAQ:AAPL:2026-07-14T09:30:00Z"
-    store.append(snapshot_id, 有效预测输入(), 有效预测输出())
+    store.append(
+        snapshot_id,
+        有效预测输入(),
+        有效预测输出(),
+        trading_calendar=交易日历,
+        prediction_label_rule=标签规则,
+    )
 
     输出覆盖 = {被篡改字段: "tampered-v2"}
     if 被篡改字段 == "up_probability":
         输出覆盖 = {"up_probability": 41.0, "down_probability": 24.0}
     with pytest.raises(ImmutablePredictionSnapshotError, match="追加|覆盖|不可变"):
-        store.append(snapshot_id, 有效预测输入(), 有效预测输出(**输出覆盖))
+        store.append(
+            snapshot_id,
+            有效预测输入(),
+            有效预测输出(**输出覆盖),
+            trading_calendar=交易日历,
+            prediction_label_rule=标签规则,
+        )
 
 
 def test_到期结果只能独立追加关联快照且不能改变原快照() -> None:

@@ -124,6 +124,39 @@ def _输出(**覆盖: object) -> PredictionOutput:
     return PredictionOutput(**负载)
 
 
+@pytest.mark.parametrize(
+    ("日历", "规则", "错误"),
+    [
+        (None, None, "必须同时绑定"),
+        (日历, None, "必须同时绑定"),
+        (None, 规则, "必须同时绑定"),
+        (
+            TradingCalendar(
+                market="CN",
+                version_id="calendar-us-v1",
+                trading_days=frozenset({date(2026, 7, 14), date(2026, 7, 15)}),
+            ),
+            规则,
+            "市场必须与证券一致",
+        ),
+    ],
+)
+def test_快照追加必须绑定同市场日历与标签规则(
+    日历: TradingCalendar | None, 规则: PredictionLabelRule | None, 错误: str
+) -> None:
+    """预测快照必须固定预测时采用的日历和规则，不能留空或跨市场混用。"""
+
+    store = PredictionSnapshotStore()
+    with pytest.raises(ImmutablePredictionSnapshotError, match=错误):
+        store.append(
+            "snapshot-required-anchors",
+            _输入(),
+            _输出(),
+            trading_calendar=日历,
+            prediction_label_rule=规则,
+        )
+
+
 def test_事实引用拒绝覆盖字段单独声称数值证据() -> None:
     with pytest.raises(ValidationError, match="数值|哈希|证据|引用"):
         _输出(
@@ -289,14 +322,20 @@ def test_快照追加对调用方嵌套对象防御拷贝() -> None:
     store = PredictionSnapshotStore()
     预测输入 = _输入()
     预测输出 = _输出()
-    snapshot = store.append("snapshot-1", 预测输入, 预测输出)
+    snapshot = store.append(
+        "snapshot-1",
+        预测输入,
+        预测输出,
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     预测输出.primary_evidence = ("被调用方修改",)
     assert snapshot.prediction_output.primary_evidence == ("本地事实",)
 
 
 def test_结果追加拒绝非快照派生的预测时点() -> None:
     store = PredictionSnapshotStore()
-    store.append("snapshot-1", _输入(), _输出())
+    store.append("snapshot-1", _输入(), _输出(), trading_calendar=日历, prediction_label_rule=规则)
     outcome = resolve_actual_outcome(
         prediction_snapshot_id="snapshot-1",
         prediction_time=时间 + timedelta(seconds=1),
@@ -345,14 +384,22 @@ def test_快照追加拒绝输入输出证券版本和新鲜度不一致() -> No
 
     store = PredictionSnapshotStore()
     with pytest.raises(ValueError, match="证券|版本|新鲜度"):
-        store.append("snapshot-mismatch", _输入(), _输出(freshness="NEAR_REALTIME"))
+        store.append(
+            "snapshot-mismatch",
+            _输入(),
+            _输出(freshness="NEAR_REALTIME"),
+            trading_calendar=日历,
+            prediction_label_rule=规则,
+        )
 
 
 def test_快照读取不能改写仓库内已保存的嵌套输出() -> None:
     """读取者修改返回对象不得污染追加保存的预测快照。"""
 
     store = PredictionSnapshotStore()
-    returned = store.append("snapshot-copy", _输入(), _输出())
+    returned = store.append(
+        "snapshot-copy", _输入(), _输出(), trading_calendar=日历, prediction_label_rule=规则
+    )
     returned.prediction_output.primary_evidence = ("错误覆盖",)
     later = store._snapshots["snapshot-copy"]
     assert later.prediction_output.primary_evidence == ("本地事实",)
@@ -502,7 +549,9 @@ def test_仓储拒绝调用方伪造的已验证标签结果() -> None:
     """仓储入口必须重验事实和标签，不能信任调用方声称的 VALIDATED。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-direct", _输入(), _输出())
+    store.append(
+        "snapshot-direct", _输入(), _输出(), trading_calendar=日历, prediction_label_rule=规则
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-direct")
     forged = ActualOutcome(
         **{**outcome.__dict__, "status": ActualOutcomeStatus.VALIDATED, "label": "UP"}
@@ -545,7 +594,13 @@ def test_仓储拒绝已签名但不能重建为有效领域对象的归一化�
     """签名只证明来源，仓储仍须拒绝无效日历、规则和公司行动 JSON。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-normalization", _输入(), _输出())
+    store.append(
+        "snapshot-normalization",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-normalization")
     forged_facts = tuple(
         _替换已签名事实值(reference, fact_value=fact_value)
@@ -563,7 +618,13 @@ def test_仓储拒绝已签名但复权比例非法的公司行动事实() -> No
     """公司行动必须完整重建，不能只校验证券和时点等少数字段。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-action-normalization", _输入(), _输出())
+    store.append(
+        "snapshot-action-normalization",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-action-normalization")
     invalid_actions = dumps(
         [
@@ -599,7 +660,13 @@ def test_仓储拒绝已签名的无穷价格事实() -> None:
     """即使来源签名有效，非有限价格也不能成为可持久化的到期结果。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-infinite-price", _输入(), _输出())
+    store.append(
+        "snapshot-infinite-price",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-infinite-price")
     forged_facts = tuple(
         _替换已签名事实值(reference, fact_value="Infinity")
@@ -628,7 +695,13 @@ def test_仓储拒绝已签名但非规范编码的价格事实(fact_type: str, 
     """价格事实必须与 Decimal 值的唯一规范文本逐字一致，不能只比较数值相等。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-price-normalization", _输入(), _输出())
+    store.append(
+        "snapshot-price-normalization",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-price-normalization")
     forged_facts = tuple(
         _替换已签名事实值(reference, fact_value=noncanonical_value)
@@ -703,7 +776,13 @@ def test_仓储拒绝预测时点后才可得的参考价格事实() -> None:
     """受信签名不能把预测完成后才采集的价格伪装成历史参考价。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-reference-future", _输入(), _输出())
+    store.append(
+        "snapshot-reference-future",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-reference-future")
     future = 时间 + timedelta(minutes=1)
     forged_facts = tuple(
@@ -727,7 +806,9 @@ def test_仓储拒绝到期交易日尚未结束的已验证结果() -> None:
     """验证日必须严格晚于到期交易日，不能在到期日盘中提前落库。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-expiry-early", _输入(), _输出())
+    store.append(
+        "snapshot-expiry-early", _输入(), _输出(), trading_calendar=日历, prediction_label_rule=规则
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-expiry-early")
     early = 时间 + timedelta(days=1)
     forged_facts = tuple(
@@ -751,7 +832,13 @@ def test_仓储拒绝已签名但非规范比例编码的公司行动事实() ->
     """比例文本也是审计事实，数值相等不能替代唯一规范编码。"""
 
     store = PredictionSnapshotStore()
-    store.append("snapshot-action-decimal", _输入(), _输出())
+    store.append(
+        "snapshot-action-decimal",
+        _输入(),
+        _输出(),
+        trading_calendar=日历,
+        prediction_label_rule=规则,
+    )
     outcome = _已验证到期结果(snapshot_id="snapshot-action-decimal")
     actions = dumps(
         [

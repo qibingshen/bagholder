@@ -1138,29 +1138,22 @@ class PredictionSnapshotStore:
             )
         ):
             raise ImmutablePredictionSnapshotError("快照输入输出版本或新鲜度必须一致")
-        if (trading_calendar is None) != (prediction_label_rule is None):
+        if trading_calendar is None or prediction_label_rule is None:
             raise ImmutablePredictionSnapshotError("快照日历与标签规则必须同时绑定")
-        if trading_calendar is not None and (
+        if (
             trading_calendar.version_id != prediction_input.trading_calendar_version
-            or prediction_label_rule is None
             or prediction_label_rule.version_id != prediction_input.prediction_label_rule_version
         ):
             raise ImmutablePredictionSnapshotError("快照日历或标签规则版本必须与预测输入一致")
+        if trading_calendar.market != _security_market(prediction_input.security_id):
+            raise ImmutablePredictionSnapshotError("快照日历市场必须与证券一致")
         snapshot = PredictionSnapshot(
             snapshot_id,
             prediction_input.model_copy(deep=True),
             prediction_output.model_copy(deep=True),
             prediction_input.predicted_at,
-            (
-                outcome_fact_value("TRADING_CALENDAR", trading_calendar)
-                if trading_calendar is not None
-                else None
-            ),
-            (
-                outcome_fact_value("LABEL_RULE", prediction_label_rule)
-                if prediction_label_rule is not None
-                else None
-            ),
+            (outcome_fact_value("TRADING_CALENDAR", trading_calendar)),
+            (outcome_fact_value("LABEL_RULE", prediction_label_rule)),
         )
         self._snapshots[snapshot_id] = snapshot
         return PredictionSnapshot(
