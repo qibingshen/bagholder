@@ -1,4 +1,4 @@
-"""验证预测标签和概率展示的性质约束，不生成预测或交易。"""
+"""验证预测标签、到期回填与概率展示的性质约束，不生成预测或交易。"""
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -7,14 +7,18 @@ from math import inf, nan
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
+from pydantic import ValidationError
 from stock_agent.domain.prediction import (
+    ActualOutcomeStatus,
+    CurrentPredictionUnavailableError,
+    PredictionInput,
     PredictionLabel,
     PredictionLabelRuleError,
-    classify_prediction_label,
+    resolve_actual_outcome,
     validate_prediction_probabilities,
 )
 
-from stock_agent.domain.market_rules import TradingCalendar
+from stock_agent.domain.market_rules import CompanyAction, TradingCalendar
 
 允许周期 = (1, 5, 20)
 阈值 = {
@@ -22,59 +26,102 @@ from stock_agent.domain.market_rules import TradingCalendar
     5: Decimal("0.03"),
     20: Decimal("0.06"),
 }
+预测时点 = datetime(2026, 7, 2, 9, 30, tzinfo=UTC)
+参考交易日 = date(2026, 7, 2)
+
+# 7 月 3 日为节假日，7 月 4 日和 5 日为周末，7 月 15 日为临时停牌日；均不能计作交易日。
+有效交易日 = (
+    date(2026, 7, 2),
+    date(2026, 7, 6),
+    date(2026, 7, 7),
+    date(2026, 7, 8),
+    date(2026, 7, 9),
+    date(2026, 7, 10),
+    date(2026, 7, 13),
+    date(2026, 7, 14),
+    date(2026, 7, 16),
+    date(2026, 7, 17),
+    date(2026, 7, 20),
+    date(2026, 7, 21),
+    date(2026, 7, 22),
+    date(2026, 7, 23),
+    date(2026, 7, 24),
+    date(2026, 7, 27),
+    date(2026, 7, 28),
+    date(2026, 7, 29),
+    date(2026, 7, 30),
+    date(2026, 7, 31),
+    date(2026, 8, 3),
+)
 
 
-def 市场日历(交易日: set[date], 版本: str = "calendar-us-v1") -> TradingCalendar:
-    """构造带版本的本地市场日历事实，避免测试依赖自然日或外部数据。"""
+def 市场日历(
+    交易日: tuple[date, ...] = 有效交易日, 版本: str = "calendar-us-v1"
+) -> TradingCalendar:
+    """构造带版本的市场日历事实，交易日只由显式市场事实决定。"""
 
     return TradingCalendar(market="US", version_id=版本, trading_days=frozenset(交易日))
 
 
-def 完整市场日历(周期: int, 版本: str = "calendar-us-v1") -> TradingCalendar:
-    """为指定交易日周期构造最小完整日历事实，不以自然日间隔替代计数。"""
+def 到期交易日(周期: int, 日历: TradingCalendar) -> date:
+    """按市场日历中的有效交易日序号取到期日，禁止以自然日 timedelta 推导。"""
 
-    参考交易日 = date(2026, 7, 14)
-    return 市场日历(
-        {参考交易日 + timedelta(days=偏移) for 偏移 in range(周期 + 1)},
-        版本,
-    )
+    交易日 = tuple(sorted(日历.trading_days))
+    return 交易日[交易日.index(参考交易日) + 周期]
 
 
-def 标签(
+def 预测输入负载(**覆盖: object) -> dict[str, object]:
+    """返回预测生成阶段可见的事实；该阶段不应包含到期结果。"""
+
+    负载: dict[str, object] = {
+        "security_id": "US:NASDAQ:AAPL",
+        "predicted_at": 预测时点,
+        "market_time": 预测时点,
+        "collected_at": 预测时点,
+        "data_version": "daily-us-v1",
+        "feature_version": "features-v1",
+        "model_version": "baseline-v1",
+        "is_current_data_available": True,
+    }
+    负载.update(覆盖)
+    return 负载
+
+
+def 到期结果(
     *,
     周期: int,
-    收益率: Decimal,
+    收益率: Decimal | None,
     日历: TradingCalendar,
-    预测时点: datetime = datetime(2026, 7, 14, tzinfo=UTC),
-    到期价格可得时点: datetime | None = None,
-    日历可得时点: datetime | None = None,
-    特征可得时点: datetime | None = None,
-) -> PredictionLabel:
-    """以固定参考价将收益率转换为总回报复权价格，集中表达标签契约输入。"""
+    到期价格可得时点: datetime | None,
+    标签规则版本: str = "prediction-label-v1",
+):
+    """仅在到期验证阶段建立独立实际结果；此处允许价格晚于预测时点可得。"""
 
-    参考交易日 = date(2026, 7, 14)
-    到期交易日 = 参考交易日 + timedelta(days=周期)
-    return classify_prediction_label(
+    到期日 = 到期交易日(周期, 日历)
+    return resolve_actual_outcome(
+        prediction_snapshot_id="prediction:NASDAQ:AAPL:2026-07-02T09:30:00Z",
+        prediction_time=预测时点,
         horizon_trading_days=周期,
         reference_trading_day=参考交易日,
-        expiry_trading_day=到期交易日,
+        expiry_trading_day=到期日,
         trading_calendar=日历,
         trading_calendar_version=日历.version_id,
         reference_total_return_adjusted_price=Decimal("100"),
-        expiry_total_return_adjusted_price=Decimal("100") * (Decimal("1") + 收益率),
-        prediction_time=预测时点,
-        expiry_price_available_at=到期价格可得时点 or 预测时点,
-        calendar_available_at=日历可得时点 or 预测时点,
-        feature_available_at=特征可得时点 or 预测时点,
+        expiry_total_return_adjusted_price=(
+            None if 收益率 is None else Decimal("100") * (Decimal("1") + 收益率)
+        ),
+        expiry_price_available_at=到期价格可得时点,
+        validated_at=(到期价格可得时点 or 预测时点) + timedelta(seconds=1),
+        prediction_label_rule_version=标签规则版本,
     )
 
 
 @pytest.mark.parametrize("周期", 允许周期)
 @given(st.decimals(min_value="-0.50", max_value="0.50", places=4))
-def test_总回报复权收益率按阈值分类为涨跌(周期: int, 收益率: Decimal) -> None:
-    """任意有限总回报收益率都必须按周期阈值，达到正阈值或负阈值即归入涨跌。"""
+def test_到期实际结果按快照规则版本和包含边界分类(周期: int, 收益率: Decimal) -> None:
+    """到期结果以快照规则版本分类：达到正阈值上涨，达到负阈值下跌，其余震荡。"""
 
-    日历 = 完整市场日历(周期)
+    日历 = 市场日历()
     预期 = (
         PredictionLabel.UP
         if 收益率 >= 阈值[周期]
@@ -83,104 +130,135 @@ def test_总回报复权收益率按阈值分类为涨跌(周期: int, 收益率
         else PredictionLabel.FLAT
     )
 
-    assert 标签(周期=周期, 收益率=收益率, 日历=日历) is 预期
+    结果 = 到期结果(
+        周期=周期,
+        收益率=收益率,
+        日历=日历,
+        到期价格可得时点=预测时点 + timedelta(days=31),
+    )
+
+    assert 结果.status is ActualOutcomeStatus.VALIDATED
+    assert 结果.label is 预期
+    assert 结果.label_rule_version == "prediction-label-v1"
 
 
 @pytest.mark.parametrize("周期", 允许周期)
-def test_总回报收益率恰好处于正负阈值时归为涨跌(周期: int) -> None:
-    """正负边界不因浮点或比较符号歧义被误判成震荡。"""
+def test_到期实际结果在正负阈值恰好归为涨跌(周期: int) -> None:
+    """1、5、20 日的精确正负阈值不因比较符号歧义被误判为震荡。"""
 
-    日历 = 完整市场日历(周期)
+    日历 = 市场日历()
+    可得时点 = 预测时点 + timedelta(days=31)
 
-    assert 标签(周期=周期, 收益率=阈值[周期], 日历=日历) is PredictionLabel.UP
-    assert 标签(周期=周期, 收益率=-阈值[周期], 日历=日历) is PredictionLabel.DOWN
+    assert (
+        到期结果(周期=周期, 收益率=阈值[周期], 日历=日历, 到期价格可得时点=可得时点).label
+        is PredictionLabel.UP
+    )
+    assert (
+        到期结果(周期=周期, 收益率=-阈值[周期], 日历=日历, 到期价格可得时点=可得时点).label
+        is PredictionLabel.DOWN
+    )
+
+
+@pytest.mark.parametrize(
+    "周期, 预期到期日", [(1, date(2026, 7, 6)), (5, date(2026, 7, 10)), (20, date(2026, 8, 3))]
+)
+def test_周期按非连续市场交易日而非自然日计数(周期: int, 预期到期日: date) -> None:
+    """周末、节假日与临停日不计入 1、5、20 个所属市场交易日。"""
+
+    日历 = 市场日历()
+
+    assert 到期交易日(周期, 日历) == 预期到期日
+    assert 预期到期日 != 参考交易日 + timedelta(days=周期)
 
 
 @given(st.integers(min_value=-100, max_value=100).filter(lambda 周期: 周期 not in 允许周期))
-def test_仅接受规定的市场交易日周期(周期: int) -> None:
-    """任意非 1、5、20 的周期均不得被当作自然日或其他交易日周期接受。"""
-
-    日历 = 完整市场日历(1)
+def test_到期结果拒绝非规定交易日周期(周期: int) -> None:
+    """任意非 1、5、20 的周期不得被自然日或其他交易日周期替代。"""
 
     with pytest.raises(PredictionLabelRuleError, match="交易日"):
-        标签(周期=周期, 收益率=Decimal("0"), 日历=日历)
-
-
-@pytest.mark.parametrize("周期", 允许周期)
-def test_交易日数量必须以传入且版本匹配的市场日历为准(周期: int) -> None:
-    """跨周末的自然日间隔不能替代传入日历中可追溯的交易日计数。"""
-
-    参考交易日 = date(2026, 7, 14)
-    到期交易日 = 参考交易日 + timedelta(days=周期)
-    缺少中间交易日的日历 = 市场日历({参考交易日, 到期交易日})
-
-    with pytest.raises(PredictionLabelRuleError, match="日历|交易日"):
-        标签(周期=周期, 收益率=Decimal("0"), 日历=缺少中间交易日的日历)
-
-    完整交易日 = {参考交易日 + timedelta(days=天数) for 天数 in range(周期 + 1)}
-    完整日历 = 市场日历(完整交易日, 版本="calendar-us-v2")
-    with pytest.raises(PredictionLabelRuleError, match="日历版本"):
-        classify_prediction_label(
-            horizon_trading_days=周期,
-            reference_trading_day=参考交易日,
-            expiry_trading_day=到期交易日,
-            trading_calendar=完整日历,
-            trading_calendar_version="calendar-us-v1",
-            reference_total_return_adjusted_price=Decimal("100"),
-            expiry_total_return_adjusted_price=Decimal("100"),
-            prediction_time=datetime(2026, 7, 14, tzinfo=UTC),
-            expiry_price_available_at=datetime(2026, 7, 14, tzinfo=UTC),
-            calendar_available_at=datetime(2026, 7, 14, tzinfo=UTC),
-            feature_available_at=datetime(2026, 7, 14, tzinfo=UTC),
+        到期结果(
+            周期=周期,
+            收益率=Decimal("0"),
+            日历=市场日历(),
+            到期价格可得时点=预测时点 + timedelta(days=31),
         )
 
 
-@given(st.integers(min_value=1, max_value=86_400))
-def test_预测时点拒绝未来到期价格日历或特征(未来秒数: int) -> None:
-    """任何晚于预测时点才可得的到期价格、日历版本或特征都不得进入标签计算。"""
+def test_预测输入拒绝到期价格且到期回填允许价格晚于预测时点() -> None:
+    """预测生成不能读取未来到期价；到期后独立回填可以使用当时才可得的价格。"""
 
-    预测时点 = datetime(2026, 7, 14, tzinfo=UTC)
-    日历 = 完整市场日历(1)
-    未来时点 = 预测时点 + timedelta(seconds=未来秒数)
-
-    for 字段 in ("到期价格可得时点", "日历可得时点", "特征可得时点"):
-        参数: dict[str, datetime] = {字段: 未来时点}
-        with pytest.raises(PredictionLabelRuleError, match="预测时点|未来"):
-            标签(周期=1, 收益率=Decimal("0"), 日历=日历, 预测时点=预测时点, **参数)
-
-
-def test_缺失有效到期价格时拒绝而非猜测标签() -> None:
-    """到期复权价格缺失时必须停止标签计算，不能以参考价或默认值伪造结果。"""
-
-    with pytest.raises(PredictionLabelRuleError, match="到期价格"):
-        classify_prediction_label(
-            horizon_trading_days=1,
-            reference_trading_day=date(2026, 7, 14),
-            expiry_trading_day=date(2026, 7, 15),
-            trading_calendar=完整市场日历(1),
-            trading_calendar_version="calendar-us-v1",
-            reference_total_return_adjusted_price=Decimal("100"),
-            expiry_total_return_adjusted_price=None,
-            prediction_time=datetime(2026, 7, 14, tzinfo=UTC),
-            expiry_price_available_at=datetime(2026, 7, 14, tzinfo=UTC),
-            calendar_available_at=datetime(2026, 7, 14, tzinfo=UTC),
-            feature_available_at=datetime(2026, 7, 14, tzinfo=UTC),
+    with pytest.raises(ValidationError, match="到期价格|预测输入|额外"):
+        PredictionInput(
+            **预测输入负载(
+                expiry_total_return_adjusted_price=Decimal("101"),
+                expiry_price_available_at=预测时点 + timedelta(days=31),
+            )
         )
+
+    结果 = 到期结果(
+        周期=1,
+        收益率=Decimal("0.01"),
+        日历=市场日历(),
+        到期价格可得时点=预测时点 + timedelta(days=31),
+    )
+    assert 结果.status is ActualOutcomeStatus.VALIDATED
+    assert 结果.label is PredictionLabel.UP
+
+
+def test_缺失有效到期价格保持待验证且不可强行分类() -> None:
+    """到期价格缺失必须形成 PENDING_VALIDATION，不能抛错后伪造方向标签。"""
+
+    结果 = 到期结果(周期=5, 收益率=None, 日历=市场日历(), 到期价格可得时点=None)
+
+    assert 结果.status is ActualOutcomeStatus.PENDING_VALIDATION
+    assert 结果.label is None
+    assert 结果.expiry_total_return_adjusted_price is None
+
+
+def test_预测输入拒绝预测时点后生效的公司行动() -> None:
+    """未来公司行动不能进入预测输入或复权特征，避免以事后事实污染预测。"""
+
+    未来行动 = CompanyAction(
+        action_id="split-aapl-20260703",
+        action_type="split",
+        effective_at=预测时点 + timedelta(days=1),
+        version_id="action-us-v2",
+        source_id="authorized-source",
+    )
+
+    with pytest.raises(CurrentPredictionUnavailableError, match="公司行动|预测时点|未来"):
+        PredictionInput(**预测输入负载(company_actions=(未来行动,)))
+
+
+def test_到期结果沿用快照标签规则版本且不得被新版回写() -> None:
+    """历史预测及其实际结果必须锁定原标签规则版本，不能被后续规则版本覆盖。"""
+
+    原结果 = 到期结果(
+        周期=20,
+        收益率=Decimal("0.06"),
+        日历=市场日历(),
+        到期价格可得时点=预测时点 + timedelta(days=31),
+        标签规则版本="prediction-label-v1",
+    )
+
+    assert 原结果.label_rule_version == "prediction-label-v1"
+    with pytest.raises(PredictionLabelRuleError, match="规则版本|回写|不可变"):
+        原结果.with_label_rule_version("prediction-label-v2")
 
 
 @given(
-    st.decimals(min_value="0", max_value="100", places=3),
-    st.decimals(min_value="0", max_value="100", places=3),
-    st.decimals(min_value="0", max_value="100", places=3),
+    st.decimals(min_value="-1", max_value="101", places=3),
+    st.decimals(min_value="-1", max_value="101", places=3),
+    st.decimals(min_value="-1", max_value="101", places=3),
 )
-def test_概率分布只接受非负且总和位于百分之百正负零点一内(
-    上涨概率: Decimal, 震荡概率: Decimal, 下跌概率: Decimal
-) -> None:
-    """任意有限三分类概率只在每项非负且总和落在允许容差内时通过验证。"""
+def test_概率仅接受每项零至一百且总和在容差内(上涨: Decimal, 震荡: Decimal, 下跌: Decimal) -> None:
+    """三项均须在 0 至 100，且总和只能落在 100% 正负 0.1 个百分点内。"""
 
-    概率 = (上涨概率, 震荡概率, 下跌概率)
+    概率 = (上涨, 震荡, 下跌)
     总和 = sum(概率)
-    if Decimal("99.9") <= 总和 <= Decimal("100.1"):
+    if all(Decimal("0") <= 值 <= Decimal("100") for 值 in 概率) and Decimal(
+        "99.9"
+    ) <= 总和 <= Decimal("100.1"):
         validate_prediction_probabilities(*概率)
     else:
         with pytest.raises(PredictionLabelRuleError, match="概率"):
@@ -190,18 +268,17 @@ def test_概率分布只接受非负且总和位于百分之百正负零点一�
 @pytest.mark.parametrize(
     "概率",
     [
-        (-Decimal("0.001"), Decimal("50"), Decimal("50.001")),
-        (Decimal("50"), -Decimal("0.001"), Decimal("50.001")),
-        (Decimal("50"), Decimal("50.001"), -Decimal("0.001")),
+        (Decimal("100.05"), Decimal("0"), Decimal("0")),
+        (Decimal("100.01"), Decimal("-0.01"), Decimal("0")),
         (nan, 50.0, 50.0),
         (inf, 50.0, 50.0),
         (-inf, 50.0, 50.0),
     ],
 )
-def test_概率拒绝负数非数和无穷值(
+def test_概率拒绝单项越界与非有限值(
     概率: tuple[Decimal | float, Decimal | float, Decimal | float],
 ) -> None:
-    """概率校验不能让负值、NaN 或正负无穷通过总和容差的边界。"""
+    """总和即使落入容差，单项 100.05、负数、NaN 或无穷也必须拒绝。"""
 
     with pytest.raises(PredictionLabelRuleError, match="概率|有限"):
         validate_prediction_probabilities(*概率)
