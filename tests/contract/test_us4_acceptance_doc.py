@@ -16,3 +16,18 @@ def test_us4_板块验收说明包含成员历史和覆盖率门禁() -> None:
     assert "禁止误导性排名" in content
     assert "py -3.12 -m pytest" in content
     assert "研究参考，不构成投资建议" in content
+
+
+def test_us4_测试结果记录包含三类指定测试() -> None:
+    """US4 测试结果记录必须列出契约、成员历史和失败场景测试。"""
+
+    path = Path("docs/acceptance/us4-test-results.md")
+
+    assert path.is_file()
+    content = path.read_text(encoding="utf-8")
+    assert "tests/contract/test_sector_contract.py" in content
+    assert "tests/property/test_sector_membership_history.py" in content
+    assert "tests/failure/test_sector_failures.py" in content
+    assert "9 passed" in content
+    assert "覆盖率不足" in content
+    assert "成员历史断裂" in content
