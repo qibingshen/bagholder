@@ -242,8 +242,8 @@
 
 ## 阶段 11：跨领域验证与发布证据
 
-- [ ] T119 [P] 完成 A 股、港股、美股适配器并实现授权、冲突、限频和降级策略：`src/stock_agent/adapters/market_data/`
-- [ ] T120 [P] 编写三市场适配器、来源冲突、授权失效和限频契约测试：`tests/contract/test_multi_market_adapters.py`
+- [X] T119 [P] 完成 A 股、港股、美股适配器并实现授权、冲突、限频和降级策略：`src/stock_agent/adapters/market_data/`
+- [X] T120 [P] 编写三市场适配器、来源冲突、授权失效和限频契约测试：`tests/contract/test_multi_market_adapters.py`
 - [ ] T121 验证各关键页面均已实现并满足阶段 2 建立的空、加载、离线、权限受限和恢复状态矩阵，记录差异与修复证据：`docs/acceptance/desktop-state-matrix.md`
 - [ ] T122 [P] 运行全量中文文档、注释、文档字符串和示例规范检查：`tools/check_chinese_project_text.py`、`tests/unit/test_chinese_conventions.py`
 - [ ] T123 运行全量契约、属性、集成和失败测试并保存版本化结果：`tests/`、`docs/acceptance/test-evidence.md`
