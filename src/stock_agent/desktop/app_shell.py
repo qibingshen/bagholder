@@ -21,6 +21,7 @@ from stock_agent.bootstrap.entrypoints import (
     TRAINING_ENTRY,
     WORKER_ENTRY,
 )
+from stock_agent.desktop.widgets.research_pages import build_research_tabs
 
 固定风险提示 = "研究参考，不构成投资建议"
 
@@ -56,15 +57,14 @@ def build_main_window() -> QMainWindow:
     status.setAlignment(Qt.AlignmentFlag.AlignCenter)
     status.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
 
-    modules = QLabel(
-        "当前入口：桌面端、local_service、worker、training、mcp。\n"
-        "行情、预测、报告和模型治理数字必须来自本地持久化事实与 MCP 工具结果。"
-    )
+    modules = QLabel("请在下方选择本地研究功能页；没有本地事实时页面会明确显示空状态。")
     modules.setObjectName("moduleSummaryLabel")
     modules.setWordWrap(True)
     modules.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-    for widget in (title, disclaimer, status, modules):
+    research_tabs = build_research_tabs()
+
+    for widget in (title, disclaimer, status, modules, research_tabs):
         layout.addWidget(widget)
 
     description = "\n".join(
