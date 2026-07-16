@@ -38,7 +38,7 @@ if (-not (Get-Command pyinstaller -ErrorAction SilentlyContinue)) {
 
 New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
 
-pyinstaller `
+py -3.12 -m PyInstaller `
     --noconfirm `
     --clean `
     --name bagholder `

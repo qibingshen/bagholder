@@ -60,6 +60,15 @@ def test_windows_打包脚本检查_native_命令退出码并使用脚本入口(
     assert "-m stock_agent.bootstrap.entrypoints" not in content
 
 
+def test_windows_打包通过_python_模块调用等待构建完成() -> None:
+    """Windows 不得使用会提前返回的启动器，必须等待 PyInstaller 子进程结束。"""
+
+    content = Path("packaging/windows/build.ps1").read_text(encoding="utf-8")
+
+    assert "py -3.12 -m PyInstaller" in content
+    assert "\npyinstaller `" not in content
+
+
 def test_打包守卫拒绝凭据本地数据和研究快照入包(tmp_path: Path) -> None:
     """安装包清单不得包含密钥、环境文件、本地数据库、行情缓存或预测快照。"""
 
