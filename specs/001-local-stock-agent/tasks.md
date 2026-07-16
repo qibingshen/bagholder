@@ -246,7 +246,7 @@
 - [X] T120 [P] 编写三市场适配器、来源冲突、授权失效和限频契约测试：`tests/contract/test_multi_market_adapters.py`
 - [X] T121 验证各关键页面均已实现并满足阶段 2 建立的空、加载、离线、权限受限和恢复状态矩阵，记录差异与修复证据：`docs/acceptance/desktop-state-matrix.md`
 - [X] T122 [P] 运行全量中文文档、注释、文档字符串和示例规范检查：`tools/check_chinese_project_text.py`、`tests/unit/test_chinese_conventions.py`
-- [ ] T123 运行全量契约、属性、集成和失败测试并保存版本化结果：`tests/`、`docs/acceptance/test-evidence.md`
+- [X] T123 运行全量契约、属性、集成和失败测试并保存版本化结果：`tests/`、`docs/acceptance/test-evidence.md`
 - [ ] T124 [P] 构建并验收 Windows 安装、启动、升级、核心流程与数据恢复：`packaging/windows/`、`docs/acceptance/windows-e2e.md`
 - [ ] T125 [P] 构建并验收 macOS Apple Silicon/Intel 安装、启动、升级、核心流程与数据恢复：`packaging/macos/`、`docs/acceptance/macos-e2e.md`
 - [ ] T126 [P] 构建并验收 Ubuntu 22.04/24.04 安装、启动、升级、核心流程与数据恢复：`packaging/linux/`、`docs/acceptance/linux-e2e.md`
