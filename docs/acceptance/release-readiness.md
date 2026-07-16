@@ -22,7 +22,7 @@
 
 | 任务 | 证据文件 | 当前状态 |
 | --- | --- | --- |
-| T124 Windows 安装包端到端验收 | `docs/acceptance/windows-e2e.md` | 未完成，已提供 `packaging/windows/build.ps1`，但缺少 Windows 10/11 真实安装包产物和端到端验收 |
+| T124 Windows 安装包端到端验收 | `docs/acceptance/windows-e2e.md` | 部分完成，已在本机生成 Windows 打包产物并通过最小启动与清单守卫；仍缺少 Windows 10/11 干净环境安装、升级、核心流程和恢复验收 |
 | T125 macOS Apple Silicon/Intel 端到端验收 | `docs/acceptance/macos-e2e.md` | 未完成，已提供 `packaging/macos/build.sh`，但当前 Windows 环境不能替代 macOS 实机或 CI |
 | T126 Ubuntu 22.04/24.04 端到端验收 | `docs/acceptance/linux-e2e.md` | 未完成，已提供 `packaging/linux/build.sh`，但当前 Windows 环境不能替代 Linux 实机或 CI |
 | T045 真实用户可用性验收 | `docs/acceptance/us1-usability-study.md` | 未完成，缺少真实参与者执行结果，不能伪造 90%/3 分钟通过率 |

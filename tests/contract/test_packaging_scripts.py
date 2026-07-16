@@ -49,6 +49,17 @@ def test_windows_打包脚本语法可被_powershell_解析() -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_windows_打包脚本检查_native_命令退出码并使用脚本入口() -> None:
+    """PowerShell 调用外部命令后必须检查退出码，且 PyInstaller 要接收脚本文件。"""
+
+    content = Path("packaging/windows/build.ps1").read_text(encoding="utf-8")
+
+    assert "Assert-NativeCommandSucceeded" in content
+    assert "$LASTEXITCODE" in content
+    assert "packaging_entry.py" in content
+    assert "-m stock_agent.bootstrap.entrypoints" not in content
+
+
 def test_打包守卫拒绝凭据本地数据和研究快照入包(tmp_path: Path) -> None:
     """安装包清单不得包含密钥、环境文件、本地数据库、行情缓存或预测快照。"""
 

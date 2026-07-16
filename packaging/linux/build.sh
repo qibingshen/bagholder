@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist/linux"
 MANIFEST_PATH="$DIST_DIR/manifest.txt"
+ENTRY_SCRIPT="$REPO_ROOT/src/stock_agent/bootstrap/packaging_entry.py"
 
 cd "$REPO_ROOT"
 
@@ -29,7 +30,7 @@ pyinstaller \
   --distpath "$DIST_DIR" \
   --workpath "$REPO_ROOT/build/linux" \
   --specpath "$REPO_ROOT/build/linux-spec" \
-  -m stock_agent.bootstrap.entrypoints
+  "$ENTRY_SCRIPT"
 
 find "$DIST_DIR" -type f | sed "s#^$REPO_ROOT/##" > "$MANIFEST_PATH"
 python3.12 tools/packaging_guard.py "$MANIFEST_PATH"

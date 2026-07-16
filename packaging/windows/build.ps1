@@ -8,14 +8,28 @@ $DistDir = Join-Path $RepoRoot "dist\windows"
 $ManifestPath = Join-Path $DistDir "manifest.txt"
 $WorkPath = Join-Path $RepoRoot "build\windows"
 $SpecPath = Join-Path $RepoRoot "build\windows-spec"
+$EntryScript = Join-Path $RepoRoot "src\stock_agent\bootstrap\packaging_entry.py"
+
+function Assert-NativeCommandSucceeded {
+    param(
+        [string]$StepName
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw "$StepName failed with exit code $LASTEXITCODE."
+    }
+}
 
 Set-Location $RepoRoot
 
 if (-not $SkipTests) {
     py -3.12 -m pytest
+    Assert-NativeCommandSucceeded "pytest"
     py -3.12 -m ruff format --check src tests
+    Assert-NativeCommandSucceeded "ruff format"
     py -3.12 -m ruff check src tests
+    Assert-NativeCommandSucceeded "ruff check"
     py -3.12 tools/check_chinese_project_text.py
+    Assert-NativeCommandSucceeded "Chinese text check"
 }
 
 if (-not (Get-Command pyinstaller -ErrorAction SilentlyContinue)) {
@@ -31,11 +45,13 @@ pyinstaller `
     --distpath $DistDir `
     --workpath $WorkPath `
     --specpath $SpecPath `
-    -m stock_agent.bootstrap.entrypoints
+    $EntryScript
+Assert-NativeCommandSucceeded "PyInstaller"
 
 Get-ChildItem -Recurse -File $DistDir |
     ForEach-Object { $_.FullName.Substring($RepoRoot.Path.Length + 1) } |
     Set-Content -Encoding UTF8 $ManifestPath
 
 py -3.12 tools/packaging_guard.py $ManifestPath
+Assert-NativeCommandSucceeded "Packaging guard"
 Write-Host "Windows package build completed: $DistDir"
