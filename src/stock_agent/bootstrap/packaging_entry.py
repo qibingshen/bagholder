@@ -1,22 +1,16 @@
-"""打包产物的最小启动入口。"""
+"""打包产物的桌面启动入口。"""
 
 from __future__ import annotations
 
-from stock_agent.bootstrap.entrypoints import (
-    DESKTOP_ENTRY,
-    LOCAL_SERVICE_ENTRY,
-    MCP_ENTRY,
-    TRAINING_ENTRY,
-    WORKER_ENTRY,
-)
+import sys
+
+from stock_agent.desktop.app_shell import run_desktop_app
 
 
 def main() -> int:
-    """输出当前安装包包含的本机进程入口名称。"""
+    """启动 PySide6 桌面应用。"""
 
-    entries = (DESKTOP_ENTRY, LOCAL_SERVICE_ENTRY, WORKER_ENTRY, TRAINING_ENTRY, MCP_ENTRY)
-    print("bagholder entries: " + ", ".join(entries))
-    return 0
+    return run_desktop_app(sys.argv)
 
 
 if __name__ == "__main__":

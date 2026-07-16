@@ -15,8 +15,8 @@
 - `git diff --check`：通过。
 - `packaging\windows\build.ps1`：通过，生成 `dist/windows/bagholder/bagholder.exe`。
 - `tools/packaging_guard.py dist/windows/manifest.txt`：通过，未发现凭据、本地数据库、行情缓存或预测快照入包。
-- `dist/windows/bagholder/bagholder.exe`：通过最小启动验证，输出 `bagholder entries: desktop, local_service, worker, training, mcp`。
-- Windows 打包产物 SHA-256：`79908F420A7D3FCDAD581F0072DD091B6407F508CE44E45B6EBED8F139E84C4D`。
+- `dist/windows/bagholder/bagholder.exe`：通过 PySide6 最小桌面窗口启动验证，窗口标题为“本地量化股票分析智能体”。
+- Windows 打包产物 SHA-256：`AD4558F4D0F92A498B7509A473C84B1FD024E44BA07E7577F4885CE27EC234B0`。
 
 ## 完成 T124 仍需补齐
 
