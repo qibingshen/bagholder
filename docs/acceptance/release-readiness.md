@@ -22,16 +22,16 @@
 
 | 任务 | 证据文件 | 当前状态 |
 | --- | --- | --- |
-| T124 Windows 安装包端到端验收 | `docs/acceptance/windows-e2e.md` | 未完成，缺少可执行安装包构建脚本和安装包产物 |
-| T125 macOS Apple Silicon/Intel 端到端验收 | `docs/acceptance/macos-e2e.md` | 未完成，当前 Windows 环境不能替代 macOS 实机或 CI |
-| T126 Ubuntu 22.04/24.04 端到端验收 | `docs/acceptance/linux-e2e.md` | 未完成，当前 Windows 环境不能替代 Linux 实机或 CI |
+| T124 Windows 安装包端到端验收 | `docs/acceptance/windows-e2e.md` | 未完成，已提供 `packaging/windows/build.ps1`，但缺少 Windows 10/11 真实安装包产物和端到端验收 |
+| T125 macOS Apple Silicon/Intel 端到端验收 | `docs/acceptance/macos-e2e.md` | 未完成，已提供 `packaging/macos/build.sh`，但当前 Windows 环境不能替代 macOS 实机或 CI |
+| T126 Ubuntu 22.04/24.04 端到端验收 | `docs/acceptance/linux-e2e.md` | 未完成，已提供 `packaging/linux/build.sh`，但当前 Windows 环境不能替代 Linux 实机或 CI |
 | T045 真实用户可用性验收 | `docs/acceptance/us1-usability-study.md` | 未完成，缺少真实参与者执行结果，不能伪造 90%/3 分钟通过率 |
 
 ## 发布前必须补齐
 
-1. 增加并执行 Windows、macOS、Linux 的真实打包脚本。
+1. 在目标平台分别执行 Windows、macOS、Linux 的真实打包脚本。
 2. 在目标平台分别安装、启动、升级并恢复本地数据、设置和任务状态。
-3. 记录三平台构建产物哈希、运行日志、失败恢复结果和不可包含凭据的检查结果。
+3. 记录三平台构建产物哈希、运行日志、`tools/packaging_guard.py` 检查结果和失败恢复结果。
 4. 完成 T045 的真实用户可用性研究，或由产品决策明确将其移出首个发布门禁。
 5. 重新运行 `py -3.12 -m pytest`、Ruff、中文规范和 `git diff --check`。
 
