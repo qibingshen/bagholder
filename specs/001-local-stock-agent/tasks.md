@@ -250,7 +250,7 @@
 - [ ] T124 [P] 构建并验收 Windows 安装、启动、升级、核心流程与数据恢复：`packaging/windows/`、`docs/acceptance/windows-e2e.md`
 - [ ] T125 [P] 构建并验收 macOS Apple Silicon/Intel 安装、启动、升级、核心流程与数据恢复：`packaging/macos/`、`docs/acceptance/macos-e2e.md`
 - [ ] T126 [P] 构建并验收 Ubuntu 22.04/24.04 安装、启动、升级、核心流程与数据恢复：`packaging/linux/`、`docs/acceptance/linux-e2e.md`
-- [ ] T127 核对所有预测、报告、回测模拟和相关对话产物均显示固定风险提示：`docs/acceptance/disclaimer-audit.md`
+- [X] T127 核对所有预测、报告、回测模拟和相关对话产物均显示固定风险提示：`docs/acceptance/disclaimer-audit.md`
 - [ ] T128 复核无券商连接、真实交易、收益承诺、MCP 管理工具或凭据泄露入口：`docs/acceptance/research-boundary-audit.md`
 - [ ] T129 汇总发布证据、模型回滚演练和三平台门禁结论：`docs/acceptance/release-readiness.md`
 
