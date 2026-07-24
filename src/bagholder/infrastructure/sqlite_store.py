@@ -149,6 +149,41 @@ class SqlitePlatformStore:
                     created_at TEXT NOT NULL,
                     FOREIGN KEY (order_id) REFERENCES orders(order_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS order_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    proposal_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS risk_verdicts (
+                    verdict_id TEXT PRIMARY KEY,
+                    verdict_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    approval_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS pipeline_runs (
+                    run_id TEXT PRIMARY KEY,
+                    state TEXT NOT NULL,
+                    security_key TEXT NOT NULL,
+                    account_id TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (mode IN ('PAPER', 'LIVE')),
+                    market_evidence_id TEXT,
+                    research_decision_id TEXT,
+                    proposal_id TEXT,
+                    verdict_id TEXT,
+                    approval_id TEXT,
+                    order_id TEXT,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -549,6 +584,274 @@ class SqlitePlatformStore:
                 ).fetchone()
         assert row is not None
         return int(row["count"])
+
+    def create_pipeline_run(
+        self,
+        *,
+        security_key: str,
+        account_id: str,
+        mode: str,
+        now: datetime,
+    ) -> object:
+        """创建 CREATED 管道并追加审计事件。"""
+
+        from bagholder.contracts.live_trading import ExecutionMode
+        from bagholder.domain.pipeline import PipelineRun, PipelineState
+
+        execution_mode = ExecutionMode(mode)
+        run_id = str(uuid4())
+        timestamp = now.astimezone(UTC).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pipeline_runs (
+                    run_id, state, security_key, account_id, mode,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    PipelineState.CREATED.value,
+                    security_key,
+                    account_id,
+                    execution_mode.value,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            self._insert_audit(
+                connection,
+                aggregate_type="PIPELINE",
+                aggregate_id=run_id,
+                event_type=PipelineState.CREATED.value,
+                payload={},
+                created_at=now,
+            )
+        return PipelineRun(
+            run_id=run_id,
+            state=PipelineState.CREATED,
+            security_key=security_key,
+            account_id=account_id,
+            mode=execution_mode,
+        )
+
+    def transition_pipeline(
+        self,
+        run_id: str,
+        target: str,
+        now: datetime,
+        **updates: str | None,
+    ) -> object:
+        """原子校验并推进管道状态。"""
+
+        from bagholder.domain.pipeline import PipelineState, ensure_transition
+
+        target_state = PipelineState(target)
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM pipeline_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(f"管道不存在：{run_id}")
+            ensure_transition(PipelineState(str(row["state"])), target_state)
+            allowed_fields = {
+                "market_evidence_id",
+                "research_decision_id",
+                "proposal_id",
+                "verdict_id",
+                "approval_id",
+                "order_id",
+                "error_code",
+            }
+            invalid = set(updates) - allowed_fields
+            if invalid:
+                raise ValueError(f"非法管道更新字段：{sorted(invalid)}")
+            assignments = ["state = ?", "updated_at = ?"]
+            values: list[object] = [target_state.value, now.astimezone(UTC).isoformat()]
+            for key, value in updates.items():
+                assignments.append(f"{key} = ?")
+                values.append(value)
+            values.append(run_id)
+            connection.execute(
+                f"UPDATE pipeline_runs SET {', '.join(assignments)} WHERE run_id = ?",
+                values,
+            )
+            self._insert_audit(
+                connection,
+                aggregate_type="PIPELINE",
+                aggregate_id=run_id,
+                event_type=target_state.value,
+                payload={key: value for key, value in updates.items() if value is not None},
+                created_at=now,
+            )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return self.get_pipeline_run(run_id)
+
+    def get_pipeline_run(self, run_id: str) -> object:
+        """读取管道当前快照。"""
+
+        from bagholder.contracts.live_trading import ExecutionMode
+        from bagholder.domain.pipeline import PipelineRun, PipelineState
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM pipeline_runs WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"管道不存在：{run_id}")
+        return PipelineRun(
+            run_id=str(row["run_id"]),
+            state=PipelineState(str(row["state"])),
+            security_key=str(row["security_key"]),
+            account_id=str(row["account_id"]),
+            mode=ExecutionMode(str(row["mode"])),
+            market_evidence_id=self._optional_text(row["market_evidence_id"]),
+            research_decision_id=self._optional_text(row["research_decision_id"]),
+            proposal_id=self._optional_text(row["proposal_id"]),
+            verdict_id=self._optional_text(row["verdict_id"]),
+            approval_id=self._optional_text(row["approval_id"]),
+            order_id=self._optional_text(row["order_id"]),
+            error_code=self._optional_text(row["error_code"]),
+        )
+
+    def save_order_proposal(self, proposal: object) -> None:
+        """保存不可变订单提案。"""
+
+        from bagholder.contracts.live_trading import OrderProposal
+
+        validated = OrderProposal.model_validate(proposal)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO order_proposals (
+                    proposal_id, proposal_json, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    str(validated.proposal_id),
+                    validated.model_dump_json(),
+                    validated.created_at.astimezone(UTC).isoformat(),
+                ),
+            )
+
+    def get_order_proposal(self, proposal_id: str) -> object:
+        """读取不可变订单提案。"""
+
+        from bagholder.contracts.live_trading import OrderProposal
+
+        payload = self._get_json("order_proposals", "proposal_id", proposal_id)
+        return OrderProposal.model_validate_json(payload)
+
+    def save_risk_verdict(self, verdict: object) -> None:
+        """保存不可变风控结果。"""
+
+        from bagholder.contracts.live_trading import RiskVerdict
+
+        validated = RiskVerdict.model_validate(verdict)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO risk_verdicts (
+                    verdict_id, verdict_json, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    str(validated.verdict_id),
+                    validated.model_dump_json(),
+                    validated.checked_at.astimezone(UTC).isoformat(),
+                ),
+            )
+
+    def get_risk_verdict(self, verdict_id: str) -> object:
+        """读取不可变风控结果。"""
+
+        from bagholder.contracts.live_trading import RiskVerdict
+
+        payload = self._get_json("risk_verdicts", "verdict_id", verdict_id)
+        return RiskVerdict.model_validate_json(payload)
+
+    def save_approval(self, approval: object) -> None:
+        """保存人工或策略审批。"""
+
+        from bagholder.contracts.live_trading import OrderApproval
+
+        validated = OrderApproval.model_validate(approval)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id, approval_json, created_at
+                ) VALUES (?, ?, ?)
+                """,
+                (
+                    str(validated.approval_id),
+                    validated.model_dump_json(),
+                    validated.approved_at.astimezone(UTC).isoformat(),
+                ),
+            )
+
+    def _get_json(self, table: str, key: str, value: str) -> str:
+        allowed = {
+            ("order_proposals", "proposal_id"): "proposal_json",
+            ("risk_verdicts", "verdict_id"): "verdict_json",
+            ("approvals", "approval_id"): "approval_json",
+        }
+        payload_column = allowed.get((table, key))
+        if payload_column is None:
+            raise ValueError("不允许的 JSON 表查询")
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT {payload_column} FROM {table} WHERE {key} = ?",
+                (value,),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"记录不存在：{value}")
+        return str(row[payload_column])
+
+    @staticmethod
+    def _insert_audit(
+        connection: sqlite3.Connection,
+        *,
+        aggregate_type: str,
+        aggregate_id: str,
+        event_type: str,
+        payload: dict[str, object],
+        created_at: datetime,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO audit_events (
+                event_id, aggregate_type, aggregate_id,
+                event_type, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid4()),
+                aggregate_type,
+                aggregate_id,
+                event_type,
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                created_at.astimezone(UTC).isoformat(),
+            ),
+        )
+
+    @staticmethod
+    def _optional_text(value: object) -> str | None:
+        return None if value is None else str(value)
 
     @staticmethod
     def _paper_position_from_row(row: sqlite3.Row) -> PaperPositionRecord:

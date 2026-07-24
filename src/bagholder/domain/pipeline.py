@@ -15,6 +15,7 @@ class PipelineState(StrEnum):
     MODEL_NOT_CONFIGURED = "MODEL_NOT_CONFIGURED"
     RESEARCH_READY = "RESEARCH_READY"
     RESEARCH_FAILED = "RESEARCH_FAILED"
+    NO_ACTION = "NO_ACTION"
     PROPOSAL_READY = "PROPOSAL_READY"
     RISK_PASSED = "RISK_PASSED"
     RISK_BLOCKED = "RISK_BLOCKED"
@@ -73,6 +74,7 @@ class PipelineRun:
     proposal_id: str | None = None
     verdict_id: str | None = None
     order_id: str | None = None
+    approval_id: str | None = None
     error_code: str | None = None
 
 
@@ -87,7 +89,9 @@ ALLOWED_TRANSITIONS: dict[PipelineState, frozenset[PipelineState]] = {
             PipelineState.RESEARCH_FAILED,
         }
     ),
-    PipelineState.RESEARCH_READY: frozenset({PipelineState.PROPOSAL_READY}),
+    PipelineState.RESEARCH_READY: frozenset(
+        {PipelineState.PROPOSAL_READY, PipelineState.NO_ACTION}
+    ),
     PipelineState.PROPOSAL_READY: frozenset(
         {PipelineState.RISK_PASSED, PipelineState.RISK_BLOCKED}
     ),
@@ -114,4 +118,3 @@ def ensure_transition(current: PipelineState, target: PipelineState) -> None:
 
     if target not in ALLOWED_TRANSITIONS.get(current, frozenset()):
         raise ValueError(f"非法状态转移：{current.value} -> {target.value}")
-
