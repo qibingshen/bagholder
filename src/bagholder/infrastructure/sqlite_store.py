@@ -74,6 +74,13 @@ class SqlitePlatformStore:
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS research_decisions (
+                    decision_id TEXT PRIMARY KEY,
+                    security_key TEXT NOT NULL,
+                    decision_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -196,3 +203,37 @@ class SqlitePlatformStore:
             raise EvidenceTamperedError("证据根对象必须是 JSON 对象")
         return cast(dict[str, object], payload)
 
+    def save_research_decision(self, decision: object) -> None:
+        """保存经过 Pydantic 校验的结构化研究决策。"""
+
+        from bagholder.contracts.live_trading import ResearchDecision
+
+        validated = ResearchDecision.model_validate(decision)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO research_decisions (
+                    decision_id, security_key, decision_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    str(validated.decision_id),
+                    validated.security_key,
+                    validated.model_dump_json(),
+                    validated.as_of.astimezone(UTC).isoformat(),
+                ),
+            )
+
+    def get_research_decision(self, decision_id: str) -> object:
+        """读取结构化研究决策；返回类型延迟导入以避免基础设施循环。"""
+
+        from bagholder.contracts.live_trading import ResearchDecision
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT decision_json FROM research_decisions WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"研究决策不存在：{decision_id}")
+        return ResearchDecision.model_validate_json(str(row["decision_json"]))
