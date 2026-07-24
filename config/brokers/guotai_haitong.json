@@ -1,0 +1,15 @@
+{
+  "account_id": "guotai-haitong-main",
+  "broker_code": "GUOTAI_HAITONG",
+  "display_name": "国泰海通证券",
+  "execution_mode": "LIVE",
+  "api_state": "API_UNAVAILABLE",
+  "required_capabilities": [
+    "live_orders",
+    "cancel",
+    "funds_query",
+    "positions_query",
+    "orders_query",
+    "trades_query"
+  ]
+}

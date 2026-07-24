@@ -1,36 +1,22 @@
-# Python 解释器与构建产物
 __pycache__/
 *.py[cod]
-.venv/
-venv/
-dist/
-build/
-*.egg-info/
-
-# 测试、日志和运行时工件
-.coverage
-coverage.xml
-htmlcov/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-*.log
-runtime/
-staging/
-test-data/
-
-# 凭据与本地配置
+.coverage
+htmlcov/
+.venv/
+dist/
+build/
+*.egg-info/
 .env
 .env.*
 !.env.example
+.secrets/
 secrets/
 *.key
 *.pem
-
-# 平台和编辑器文件
-.DS_Store
-Thumbs.db
-*.tmp
-*.swp
-.idea/
-.vscode/
+*.log
+.runtime/
+var/
+.superpowers/
