@@ -1,26 +1,195 @@
-# 本地量化股票分析智能体
+# A 股智能体交易平台
 
-这是一个仅用于股票研究、模拟预测和历史验证的本地桌面应用。第一阶段不连接券商、不执行真实交易，
-所有预测和报告均应显示“研究参考，不构成投资建议”。
+本项目把 TradingAgents-Astock 的真实 A 股数据和多智能体研究、确定性订单转换、
+A 股事前风控、人工审批、模拟撮合和 vn.py 实盘 Gateway 整合为一个本地命令行平台。
 
-## 开发环境
+## 当前能力
 
-需要 Python 3.12。安装开发依赖：
+- 从 TradingAgents-Astock 的 `a_stock` 数据供应商获取真实日 K；
+- 原始行情和研究报告保存为不可变 JSON，并在 SQLite 登记 SHA-256；
+- 通过独立 Python 环境运行 OpenAI 兼容模型；
+- 研究结论转换为结构化 `ResearchDecision`，不能直接下单；
+- PAPER 和 LIVE 共用提案、风控、审批与幂等契约；
+- SQLite 模拟资金、持仓、订单和成交事务账本；
+- 签名、时间窗和 nonce 保护的 vn.py 子进程协议；
+- 中信证券、国泰海通和后续券商使用统一 Gateway 接口。
+
+## 安装
+
+主平台：
 
 ```powershell
-py -3.12 -m pip install -e ".[dev]"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 ```
 
-运行测试：
+TradingAgents-Astock：
 
 ```powershell
-py -3.12 -m pytest
+python -m venv .runtime\tradingagents
+.\.runtime\tradingagents\Scripts\python.exe -m pip install `
+  -r integrations\tradingagents\requirements.lock
 ```
 
-运行中文说明检查：
+vn.py 节点：
 
 ```powershell
-py -3.12 tools/check_chinese_project_text.py .
+python -m venv .runtime\vnpy
+.\.runtime\vnpy\Scripts\python.exe -m pip install `
+  -r integrations\vnpy\requirements.lock
 ```
 
-Windows、macOS 和 Linux 的正式打包、安装、升级与恢复验收将在跨平台交付阶段分别完成。
+检查环境：
+
+```powershell
+.\.venv\Scripts\bagholder.exe doctor --json
+.\.venv\Scripts\bagholder.exe status --json
+```
+
+## 模型配置
+
+复制 `.env.example` 中的变量到本机安全环境。至少配置：
+
+```powershell
+$env:TRADINGAGENTS_LLM_PROVIDER = "openai"
+$env:TRADINGAGENTS_MODEL = "你的 OpenAI 兼容模型名"
+$env:TRADINGAGENTS_API_KEY = "从系统凭据存储读取的密钥"
+
+# 使用兼容服务时再设置
+$env:TRADINGAGENTS_BACKEND_URL = "https://example.com/v1"
+```
+
+API Key 不得写入仓库、命令参数、SQLite、证据文件或日志。
+
+## 获取真实行情
+
+```powershell
+.\.venv\Scripts\bagholder.exe market fetch CN:600519.SH `
+  --start 2026-07-01 `
+  --end 2026-07-24 `
+  --json
+```
+
+输出包含证据 ID、来源、文件路径和 SHA-256。公共数据用于研究与模拟，不等同于券商柜台实时行情。
+
+## 运行 TradingAgents 研究
+
+自动获取行情后研究：
+
+```powershell
+.\.venv\Scripts\bagholder.exe research run CN:600519.SH `
+  --date 2026-07-24 `
+  --start 2026-07-01 `
+  --json
+```
+
+也可以使用已经登记的市场证据：
+
+```powershell
+.\.venv\Scripts\bagholder.exe research run CN:600519.SH `
+  --date 2026-07-24 `
+  --evidence-id <市场证据ID> `
+  --json
+```
+
+没有模型配置时返回 `MODEL_NOT_CONFIGURED`，不会生成订单。
+
+## 模拟交易完整流程
+
+创建模拟账户：
+
+```powershell
+.\.venv\Scripts\bagholder.exe paper account create `
+  --account paper-main `
+  --cash 1000000 `
+  --json
+```
+
+运行到人工审批：
+
+```powershell
+.\.venv\Scripts\bagholder.exe pipeline run CN:600519.SH `
+  --account paper-main `
+  --date 2026-07-24 `
+  --start 2026-07-01 `
+  --mode PAPER `
+  --json
+```
+
+明确审批后模拟成交：
+
+```powershell
+.\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
+  --mode PAPER `
+  --json
+```
+
+查询：
+
+```powershell
+.\.venv\Scripts\bagholder.exe pipeline show <运行ID> --json
+.\.venv\Scripts\bagholder.exe paper account show paper-main --json
+.\.venv\Scripts\bagholder.exe order show <订单ID> --json
+```
+
+## 真实下单
+
+平台已实现 LIVE 执行通道：
+
+```text
+本地人工审批
+→ 实盘总开关和账户开关
+→ Gateway 健康、行情和对账检查
+→ HMAC 签名 vn.py 请求
+→ 券商私有 Gateway
+→ 真实委托、撤单、订单和成交回报
+```
+
+正式接入后使用：
+
+```powershell
+$env:BAGHOLDER_LIVE_ENABLED = "true"
+$env:BAGHOLDER_ACCOUNT_LIVE_ENABLED = "true"
+$env:BAGHOLDER_VNPY_GATEWAY_PLUGIN = "bagholder_vnpy_citic:create_gateway"
+$env:BAGHOLDER_TRADING_NODE_SECRET_HEX = "<从系统凭据存储读取>"
+
+.\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
+  --mode LIVE `
+  --confirm-live `
+  --json
+```
+
+CLI 会要求再次输入完整账户、证券、方向和数量。非交互环境、确认不匹配、对账未完成、
+行情不新鲜或 Gateway 不可用时都拒绝发单。LIVE 失败绝不自动转成 PAPER。
+
+当前仓库没有中信证券或国泰海通的私有 SDK，因此两家账户继续显示
+`API_UNAVAILABLE`。要真正发送生产订单，必须分别取得：
+
+- 券商批准的程序化交易产品和 API 权限；
+- 官方 SDK、服务器地址和接口文档；
+- 测试账户及测试交易环境；
+- 委托、撤单、资金、持仓、订单、成交和断线恢复能力；
+- 经确认的私有 `bagholder_vnpy_*:create_gateway` 插件；
+- 券商测试环境完整验收。
+
+普通证券客户端账号密码不能替代程序化交易接口。首次联调必须在券商测试环境完成。
+
+## 测试
+
+确定性测试不会访问网络：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m mypy src
+```
+
+显式真实行情冒烟：
+
+```powershell
+$env:RUN_LIVE_DATA_TESTS = "1"
+.\.venv\Scripts\python.exe -m pytest tests\live\test_astock_market_data.py -q
+Remove-Item Env:RUN_LIVE_DATA_TESTS
+```
+
+冒烟测试只获取 `600519` 的指定历史日 K、保存证据并校验摘要，不运行模型，也不产生任何订单。

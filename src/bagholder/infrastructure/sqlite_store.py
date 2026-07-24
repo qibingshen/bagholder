@@ -184,6 +184,14 @@ class SqlitePlatformStore:
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS execution_receipts (
+                    idempotency_key TEXT PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    broker_order_id TEXT NOT NULL,
+                    accepted INTEGER NOT NULL,
+                    status TEXT NOT NULL
+                );
                 """
             )
 
@@ -584,6 +592,81 @@ class SqlitePlatformStore:
                 ).fetchone()
         assert row is not None
         return int(row["count"])
+
+    def list_paper_positions(self, account_id: str) -> tuple[PaperPositionRecord, ...]:
+        """列出模拟账户全部持仓。"""
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM paper_positions
+                WHERE account_id = ?
+                ORDER BY security_key
+                """,
+                (account_id,),
+            ).fetchall()
+        return tuple(self._paper_position_from_row(row) for row in rows)
+
+    def get_order(self, order_id: str) -> dict[str, object]:
+        """按内部或券商订单号查询订单。"""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM orders
+                WHERE order_id = ? OR broker_order_id = ?
+                """,
+                (order_id, order_id),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"订单不存在：{order_id}")
+        return {key: row[key] for key in row.keys()}
+
+    def find(self, idempotency_key: str) -> BrokerOrderReceipt | None:
+        """实现 LiveExecutionService 的持久化幂等查询。"""
+
+        from bagholder.domain.broker import BrokerOrderReceipt
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM execution_receipts
+                WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        return BrokerOrderReceipt(
+            account_id=str(row["account_id"]),
+            broker_order_id=str(row["broker_order_id"]),
+            accepted=bool(row["accepted"]),
+            status=str(row["status"]),
+        )
+
+    def save(
+        self,
+        idempotency_key: str,
+        receipt: BrokerOrderReceipt,
+    ) -> None:
+        """保存真实执行回执；相同幂等键不可覆盖。"""
+
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO execution_receipts (
+                    idempotency_key, account_id, broker_order_id,
+                    accepted, status
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    idempotency_key,
+                    receipt.account_id,
+                    receipt.broker_order_id,
+                    int(receipt.accepted),
+                    receipt.status,
+                ),
+            )
 
     def create_pipeline_run(
         self,
