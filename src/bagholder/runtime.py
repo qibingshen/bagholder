@@ -208,7 +208,7 @@ def build_runtime() -> PlatformRuntime:
     research = ResearchService(research_client, store)
     paper = PaperExecutionService(store)
 
-    gateway, api_state, health = _build_live_gateway(root)
+    gateway, api_state, health = _build_live_gateway(root, home)
     live_executor = (
         LiveExecutionService(store, gateway)
         if gateway is not None and api_state is BrokerApiState.READY
@@ -240,10 +240,12 @@ def build_runtime() -> PlatformRuntime:
 
 def _build_live_gateway(
     root: Path,
+    home: Path,
 ) -> tuple[BrokerGateway | None, BrokerApiState, dict[str, object]]:
     plugin = os.getenv("BAGHOLDER_VNPY_GATEWAY_PLUGIN", "").strip()
+    plugin_sha256 = os.getenv("BAGHOLDER_VNPY_GATEWAY_SHA256", "").strip()
     secret_hex = os.getenv("BAGHOLDER_TRADING_NODE_SECRET_HEX", "").strip()
-    if not plugin or not secret_hex:
+    if not plugin or len(plugin_sha256) != 64 or not secret_hex:
         return None, BrokerApiState.API_UNAVAILABLE, {}
     try:
         secret = bytes.fromhex(secret_hex)
@@ -258,6 +260,8 @@ def _build_live_gateway(
         ),
         server_path=root / "integrations" / "vnpy" / "server.py",
         gateway_plugin=plugin,
+        gateway_plugin_sha256=plugin_sha256,
+        nonce_store_path=home / "vnpy-nonces.sqlite3",
         secret=secret,
     )
     gateway = VnpyBrokerGateway(VnpyClient(secret=secret, transport=transport))

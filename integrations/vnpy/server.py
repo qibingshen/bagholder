@@ -9,11 +9,14 @@ import argparse
 import hashlib
 import hmac
 import importlib
+import importlib.util
 import json
 import os
+import sqlite3
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 ALLOWED_COMMANDS = {
@@ -37,7 +40,38 @@ def _signature(secret: bytes, message: dict[str, Any]) -> str:
     return hmac.new(secret, encoded, hashlib.sha256).hexdigest()
 
 
-def _verify(message: dict[str, Any], secret: bytes) -> tuple[str, dict[str, Any]]:
+def _claim_nonce(nonce: str, database_path: Path) -> None:
+    """跨一次性子进程持久化 nonce，阻止在时间窗内重放交易指令。"""
+
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+    now_timestamp = datetime.now(UTC).timestamp()
+    with sqlite3.connect(database_path, timeout=5) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS used_nonces (
+                nonce TEXT PRIMARY KEY,
+                claimed_at REAL NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "DELETE FROM used_nonces WHERE claimed_at < ?",
+            (now_timestamp - 60,),
+        )
+        try:
+            connection.execute(
+                "INSERT INTO used_nonces (nonce, claimed_at) VALUES (?, ?)",
+                (nonce, now_timestamp),
+            )
+        except sqlite3.IntegrityError as error:
+            raise PermissionError("REPLAY_DETECTED") from error
+
+
+def _verify(
+    message: dict[str, Any],
+    secret: bytes,
+    nonce_store_path: Path,
+) -> tuple[str, dict[str, Any]]:
     command = str(message.get("command", ""))
     if command not in ALLOWED_COMMANDS:
         raise PermissionError("COMMAND_NOT_ALLOWED")
@@ -50,20 +84,30 @@ def _verify(message: dict[str, Any], secret: bytes) -> tuple[str, dict[str, Any]
     unsigned = {key: value for key, value in message.items() if key != "signature"}
     if not hmac.compare_digest(provided, _signature(secret, unsigned)):
         raise PermissionError("SIGNATURE_INVALID")
-    if not str(message.get("nonce", "")):
+    nonce = str(message.get("nonce", ""))
+    if not nonce:
         raise PermissionError("NONCE_REQUIRED")
+    _claim_nonce(nonce, nonce_store_path)
     payload = message.get("payload")
     if not isinstance(payload, dict):
         raise ValueError("PAYLOAD_INVALID")
     return command, payload
 
 
-def _load_gateway(plugin: str) -> object:
+def _load_gateway(plugin: str, expected_sha256: str) -> object:
     if ":" not in plugin:
         raise ValueError("GATEWAY_PLUGIN_INVALID")
     module_name, factory_name = plugin.split(":", maxsplit=1)
     if not module_name.startswith("bagholder_vnpy_") or factory_name != "create_gateway":
         raise PermissionError("GATEWAY_PLUGIN_NOT_TRUSTED")
+    if len(expected_sha256) != 64:
+        raise PermissionError("GATEWAY_PLUGIN_HASH_REQUIRED")
+    spec = importlib.util.find_spec(module_name)
+    if spec is None or spec.origin is None:
+        raise ImportError("GATEWAY_PLUGIN_NOT_FOUND")
+    actual_sha256 = hashlib.sha256(Path(spec.origin).read_bytes()).hexdigest()
+    if not hmac.compare_digest(actual_sha256, expected_sha256.lower()):
+        raise PermissionError("GATEWAY_PLUGIN_HASH_MISMATCH")
     module = importlib.import_module(module_name)
     factory = getattr(module, factory_name)
     gateway = factory()
@@ -96,6 +140,10 @@ def _dispatch(gateway: object, command: str, payload: dict[str, Any]) -> object:
 
 def _request_once(plugin: str) -> int:
     secret_hex = os.getenv("BAGHOLDER_TRADING_NODE_SECRET_HEX", "")
+    plugin_sha256 = os.getenv("BAGHOLDER_VNPY_GATEWAY_SHA256", "")
+    nonce_store = Path(
+        os.getenv("BAGHOLDER_VNPY_NONCE_STORE", "vnpy-nonces.sqlite3")
+    ).resolve()
     try:
         secret = bytes.fromhex(secret_hex)
     except ValueError:
@@ -107,8 +155,12 @@ def _request_once(plugin: str) -> int:
         message = json.loads(line)
         if not isinstance(message, dict):
             raise ValueError("REQUEST_INVALID")
-        command, payload = _verify(message, secret)
-        result = _dispatch(_load_gateway(plugin), command, payload)
+        command, payload = _verify(message, secret, nonce_store)
+        result = _dispatch(
+            _load_gateway(plugin, plugin_sha256),
+            command,
+            payload,
+        )
         response = {"ok": True, "result": result}
     except Exception as error:
         print(f"vn.py request failed: {type(error).__name__}", file=sys.stderr)

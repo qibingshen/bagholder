@@ -618,9 +618,25 @@ class SqlitePlatformStore:
                 """,
                 (order_id, order_id),
             ).fetchone()
-        if row is None:
+            if row is not None:
+                return {key: row[key] for key in row.keys()}
+            receipt = connection.execute(
+                """
+                SELECT * FROM execution_receipts
+                WHERE broker_order_id = ? OR idempotency_key = ?
+                """,
+                (order_id, order_id),
+            ).fetchone()
+        if receipt is None:
             raise LookupError(f"订单不存在：{order_id}")
-        return {key: row[key] for key in row.keys()}
+        return {
+            "order_id": str(receipt["idempotency_key"]),
+            "broker_order_id": str(receipt["broker_order_id"]),
+            "account_id": str(receipt["account_id"]),
+            "mode": "LIVE",
+            "accepted": bool(receipt["accepted"]),
+            "status": str(receipt["status"]),
+        }
 
     def find(self, idempotency_key: str) -> BrokerOrderReceipt | None:
         """实现 LiveExecutionService 的持久化幂等查询。"""

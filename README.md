@@ -151,6 +151,7 @@ API Key 不得写入仓库、命令参数、SQLite、证据文件或日志。
 $env:BAGHOLDER_LIVE_ENABLED = "true"
 $env:BAGHOLDER_ACCOUNT_LIVE_ENABLED = "true"
 $env:BAGHOLDER_VNPY_GATEWAY_PLUGIN = "bagholder_vnpy_citic:create_gateway"
+$env:BAGHOLDER_VNPY_GATEWAY_SHA256 = "<受信 Gateway 插件文件的 SHA-256>"
 $env:BAGHOLDER_TRADING_NODE_SECRET_HEX = "<从系统凭据存储读取>"
 
 .\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `

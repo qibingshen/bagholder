@@ -1,8 +1,19 @@
+import hashlib
 import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
+
+import pytest
+
+SECRET = b"0123456789abcdef0123456789abcdef"
+
+
+def _plugin_sha256() -> str:
+    root = Path(__file__).parents[2]
+    plugin_path = root / "integrations" / "vnpy" / "bagholder_vnpy_fake.py"
+    return hashlib.sha256(plugin_path.read_bytes()).hexdigest()
 
 
 def _request():
@@ -52,24 +63,32 @@ def _request():
     )
 
 
-def _gateway():
-    from bagholder.adapters.broker.vnpy_gateway import VnpyBrokerGateway
-    from bagholder.integrations.vnpy_client import SubprocessVnpyTransport, VnpyClient
+def _transport(tmp_path: Path, *, plugin_sha256: str | None = None):
+    from bagholder.integrations.vnpy_client import SubprocessVnpyTransport
 
     root = Path(__file__).parents[2]
-    secret = b"0123456789abcdef0123456789abcdef"
-    transport = SubprocessVnpyTransport(
+    return SubprocessVnpyTransport(
         python_executable=sys.executable,
         server_path=root / "integrations" / "vnpy" / "server.py",
         gateway_plugin="bagholder_vnpy_fake:create_gateway",
-        secret=secret,
+        gateway_plugin_sha256=plugin_sha256 or _plugin_sha256(),
+        nonce_store_path=tmp_path / "vnpy-nonces.sqlite3",
+        secret=SECRET,
         timeout_seconds=5,
     )
-    return VnpyBrokerGateway(VnpyClient(secret=secret, transport=transport))
 
 
-def test_签名子进程协议能够提交真实模式委托() -> None:
-    gateway = _gateway()
+def _gateway(tmp_path: Path):
+    from bagholder.adapters.broker.vnpy_gateway import VnpyBrokerGateway
+    from bagholder.integrations.vnpy_client import VnpyClient
+
+    return VnpyBrokerGateway(
+        VnpyClient(secret=SECRET, transport=_transport(tmp_path))
+    )
+
+
+def test_签名子进程协议能够提交真实模式委托(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
 
     receipt = gateway.submit(_request())
 
@@ -78,9 +97,41 @@ def test_签名子进程协议能够提交真实模式委托() -> None:
     assert receipt.broker_order_id.startswith("FAKE-LIVE-")
 
 
-def test_vnpy_gateway_资金查询转换为_decimal() -> None:
-    gateway = _gateway()
+def test_vnpy_gateway_资金查询转换为_decimal(tmp_path: Path) -> None:
+    gateway = _gateway(tmp_path)
 
     funds = gateway.query_funds("citic-main")
 
     assert funds["cash_available"] == Decimal("1000000.00")
+
+
+def test_受信插件摘要不匹配时拒绝加载(tmp_path: Path) -> None:
+    from bagholder.integrations.vnpy_client import VnpyClient, VnpyNodeError
+
+    client = VnpyClient(
+        secret=SECRET,
+        transport=_transport(tmp_path, plugin_sha256="0" * 64),
+    )
+
+    with pytest.raises(VnpyNodeError) as captured:
+        client.request("HEALTH", {})
+
+    assert captured.value.error_code == "GATEWAY_PLUGIN_HASH_MISMATCH"
+
+
+def test_nonce_在不同交易节点进程间也不能重放(tmp_path: Path) -> None:
+    from bagholder.integrations.vnpy_protocol import AuthenticatedProtocol
+
+    transport = _transport(tmp_path)
+    message = AuthenticatedProtocol(secret=SECRET).sign(
+        command="HEALTH",
+        payload={},
+        nonce="cross-process-replay-nonce",
+        now=datetime.now(UTC),
+    )
+
+    first = transport.send(message)
+    second = transport.send(message)
+
+    assert first["ok"] is True
+    assert second == {"ok": False, "error_code": "REPLAY_DETECTED"}

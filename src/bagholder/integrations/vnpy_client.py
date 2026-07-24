@@ -40,6 +40,8 @@ class SubprocessVnpyTransport:
         python_executable: str | Path,
         server_path: str | Path,
         gateway_plugin: str,
+        gateway_plugin_sha256: str,
+        nonce_store_path: str | Path,
         secret: bytes,
         timeout_seconds: float = 10,
     ) -> None:
@@ -51,6 +53,8 @@ class SubprocessVnpyTransport:
             "--gateway-plugin",
             gateway_plugin,
         ]
+        self._gateway_plugin_sha256 = gateway_plugin_sha256
+        self._nonce_store_path = Path(nonce_store_path).resolve()
         self._secret_hex = secret.hex()
         self._timeout_seconds = timeout_seconds
 
@@ -59,6 +63,8 @@ class SubprocessVnpyTransport:
 
         environment = self._safe_environment()
         environment["BAGHOLDER_TRADING_NODE_SECRET_HEX"] = self._secret_hex
+        environment["BAGHOLDER_VNPY_GATEWAY_SHA256"] = self._gateway_plugin_sha256
+        environment["BAGHOLDER_VNPY_NONCE_STORE"] = str(self._nonce_store_path)
         try:
             completed = subprocess.run(
                 self._command,
@@ -135,4 +141,3 @@ class VnpyClient:
         if not isinstance(result, dict):
             raise VnpyProtocolError("vn.py result 必须是对象")
         return cast(dict[str, object], result)
-

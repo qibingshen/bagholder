@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from uuid import uuid4
 
 
@@ -86,3 +87,19 @@ def test_未经批准的请求不会调用网关() -> None:
         raise AssertionError("未经批准的真实订单必须被拒绝")
 
     assert gateway.submit_call_count == 0
+
+
+def test_真实执行回执可按券商订单号查询(tmp_path: Path) -> None:
+    from bagholder.application.execution_service import LiveExecutionService
+    from bagholder.infrastructure.sqlite_store import SqlitePlatformStore
+    from bagholder.testing.fake_gateway import FakeBrokerGateway
+
+    store = SqlitePlatformStore(tmp_path / "platform.db", tmp_path / "evidence")
+    service = LiveExecutionService(store, FakeBrokerGateway())
+
+    receipt = service.submit(_request(), datetime.now(UTC))
+    order = store.get_order(receipt.broker_order_id)
+
+    assert order["broker_order_id"] == receipt.broker_order_id
+    assert order["mode"] == "LIVE"
+    assert order["status"] == "SUBMITTED"
