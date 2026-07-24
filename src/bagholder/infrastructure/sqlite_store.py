@@ -8,9 +8,14 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
-from typing import Literal, cast
+from typing import TYPE_CHECKING, Literal, cast
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from bagholder.contracts.live_trading import ExecutionRequest
+    from bagholder.domain.broker import BrokerOrderReceipt
 
 
 class EvidenceTamperedError(RuntimeError):
@@ -29,6 +34,28 @@ class EvidenceRecord:
     path: str
     sha256: str
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PaperAccountRecord:
+    """模拟账户资金快照。"""
+
+    account_id: str
+    cash: Decimal
+    status: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PaperPositionRecord:
+    """模拟账户单证券持仓。"""
+
+    account_id: str
+    security_key: str
+    total_quantity: int
+    available_to_sell: int
+    average_cost: Decimal
 
 
 class SqlitePlatformStore:
@@ -80,6 +107,47 @@ class SqlitePlatformStore:
                     security_key TEXT NOT NULL,
                     decision_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_accounts (
+                    account_id TEXT PRIMARY KEY,
+                    cash TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS paper_positions (
+                    account_id TEXT NOT NULL,
+                    security_key TEXT NOT NULL,
+                    total_quantity INTEGER NOT NULL,
+                    available_to_sell INTEGER NOT NULL,
+                    average_cost TEXT NOT NULL,
+                    PRIMARY KEY (account_id, security_key),
+                    FOREIGN KEY (account_id) REFERENCES paper_accounts(account_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS orders (
+                    order_id TEXT PRIMARY KEY,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    account_id TEXT NOT NULL,
+                    security_key TEXT NOT NULL,
+                    mode TEXT NOT NULL CHECK (mode IN ('PAPER', 'LIVE')),
+                    side TEXT NOT NULL CHECK (side IN ('BUY', 'SELL')),
+                    quantity INTEGER NOT NULL,
+                    limit_price TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    broker_order_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS fills (
+                    fill_id TEXT PRIMARY KEY,
+                    order_id TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    price TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (order_id) REFERENCES orders(order_id)
                 );
                 """
             )
@@ -237,3 +305,261 @@ class SqlitePlatformStore:
         if row is None:
             raise LookupError(f"研究决策不存在：{decision_id}")
         return ResearchDecision.model_validate_json(str(row["decision_json"]))
+
+    def create_paper_account(
+        self,
+        account_id: str,
+        cash: Decimal,
+        now: datetime,
+    ) -> None:
+        """登记模拟账户；重复 ID 明确失败。"""
+
+        if now.tzinfo is None:
+            raise ValueError("模拟账户时间必须包含时区")
+        timestamp = now.astimezone(UTC).isoformat()
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO paper_accounts (
+                        account_id, cash, status, created_at, updated_at
+                    ) VALUES (?, ?, 'ACTIVE', ?, ?)
+                    """,
+                    (account_id, self._decimal_text(cash), timestamp, timestamp),
+                )
+        except sqlite3.IntegrityError as error:
+            raise ValueError(f"模拟账户已存在：{account_id}") from error
+
+    def get_paper_account(self, account_id: str) -> PaperAccountRecord:
+        """读取模拟账户资金。"""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM paper_accounts WHERE account_id = ?",
+                (account_id,),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"模拟账户不存在：{account_id}")
+        return PaperAccountRecord(
+            account_id=str(row["account_id"]),
+            cash=Decimal(str(row["cash"])),
+            status=str(row["status"]),
+            created_at=datetime.fromisoformat(str(row["created_at"])),
+            updated_at=datetime.fromisoformat(str(row["updated_at"])),
+        )
+
+    def get_paper_position(
+        self,
+        account_id: str,
+        security_key: str,
+    ) -> PaperPositionRecord:
+        """读取模拟持仓。"""
+
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM paper_positions
+                WHERE account_id = ? AND security_key = ?
+                """,
+                (account_id, security_key),
+            ).fetchone()
+        if row is None:
+            raise LookupError(f"模拟持仓不存在：{account_id}/{security_key}")
+        return self._paper_position_from_row(row)
+
+    def execute_paper_order(
+        self,
+        request: ExecutionRequest,
+        now: datetime,
+    ) -> BrokerOrderReceipt:
+        """在单一数据库事务中撮合并更新资金和持仓。"""
+
+        from bagholder.contracts.live_trading import ExecutionRequest, OrderSide
+        from bagholder.domain.broker import BrokerOrderReceipt
+
+        validated = ExecutionRequest.model_validate(request)
+        proposal = validated.proposal
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                """
+                SELECT account_id, broker_order_id, status
+                FROM orders WHERE idempotency_key = ?
+                """,
+                (validated.idempotency_key,),
+            ).fetchone()
+            if existing is not None:
+                connection.rollback()
+                return BrokerOrderReceipt(
+                    account_id=str(existing["account_id"]),
+                    broker_order_id=str(existing["broker_order_id"]),
+                    accepted=True,
+                    status=str(existing["status"]),
+                )
+
+            account = connection.execute(
+                "SELECT * FROM paper_accounts WHERE account_id = ?",
+                (proposal.account_id,),
+            ).fetchone()
+            if account is None:
+                raise LookupError(f"模拟账户不存在：{proposal.account_id}")
+            if str(account["status"]) != "ACTIVE":
+                raise PermissionError("PAPER_ACCOUNT_NOT_ACTIVE")
+
+            position = connection.execute(
+                """
+                SELECT * FROM paper_positions
+                WHERE account_id = ? AND security_key = ?
+                """,
+                (proposal.account_id, proposal.security_key),
+            ).fetchone()
+            old_total = int(position["total_quantity"]) if position is not None else 0
+            old_available = (
+                int(position["available_to_sell"]) if position is not None else 0
+            )
+            old_cost = (
+                Decimal(str(position["average_cost"]))
+                if position is not None
+                else Decimal("0")
+            )
+            cash = Decimal(str(account["cash"]))
+            amount = proposal.limit_price * proposal.quantity
+
+            if proposal.side is OrderSide.BUY:
+                if amount > cash:
+                    raise PermissionError("INSUFFICIENT_CASH")
+                new_cash = cash - amount
+                new_total = old_total + proposal.quantity
+                new_available = old_available
+                new_cost = (
+                    (old_cost * old_total + amount) / new_total
+                    if new_total
+                    else Decimal("0")
+                )
+            else:
+                if proposal.quantity > old_available:
+                    raise PermissionError("INSUFFICIENT_POSITION")
+                new_cash = cash + amount
+                new_total = old_total - proposal.quantity
+                new_available = old_available - proposal.quantity
+                new_cost = old_cost if new_total else Decimal("0")
+
+            order_id = str(uuid4())
+            broker_order_id = f"PAPER-{uuid4().hex}"
+            timestamp = now.astimezone(UTC).isoformat()
+            connection.execute(
+                """
+                INSERT INTO orders (
+                    order_id, idempotency_key, account_id, security_key,
+                    mode, side, quantity, limit_price, status,
+                    broker_order_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'FILLED', ?, ?)
+                """,
+                (
+                    order_id,
+                    validated.idempotency_key,
+                    proposal.account_id,
+                    proposal.security_key,
+                    proposal.mode.value,
+                    proposal.side.value,
+                    proposal.quantity,
+                    self._decimal_text(proposal.limit_price),
+                    broker_order_id,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO fills (
+                    fill_id, order_id, quantity, price, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid4()),
+                    order_id,
+                    proposal.quantity,
+                    self._decimal_text(proposal.limit_price),
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE paper_accounts
+                SET cash = ?, updated_at = ?
+                WHERE account_id = ?
+                """,
+                (self._decimal_text(new_cash), timestamp, proposal.account_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO paper_positions (
+                    account_id, security_key, total_quantity,
+                    available_to_sell, average_cost
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account_id, security_key) DO UPDATE SET
+                    total_quantity = excluded.total_quantity,
+                    available_to_sell = excluded.available_to_sell,
+                    average_cost = excluded.average_cost
+                """,
+                (
+                    proposal.account_id,
+                    proposal.security_key,
+                    new_total,
+                    new_available,
+                    self._decimal_text(new_cost),
+                ),
+            )
+            connection.commit()
+            return BrokerOrderReceipt(
+                account_id=proposal.account_id,
+                broker_order_id=broker_order_id,
+                accepted=True,
+                status="FILLED",
+            )
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def count_orders(self) -> int:
+        """返回订单总数，供状态查询和验收使用。"""
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM orders").fetchone()
+        assert row is not None
+        return int(row["count"])
+
+    def count_fills(self, idempotency_key: str | None = None) -> int:
+        """返回全部或指定幂等订单的成交数。"""
+
+        with self._connect() as connection:
+            if idempotency_key is None:
+                row = connection.execute("SELECT COUNT(*) AS count FROM fills").fetchone()
+            else:
+                row = connection.execute(
+                    """
+                    SELECT COUNT(*) AS count
+                    FROM fills
+                    JOIN orders ON orders.order_id = fills.order_id
+                    WHERE orders.idempotency_key = ?
+                    """,
+                    (idempotency_key,),
+                ).fetchone()
+        assert row is not None
+        return int(row["count"])
+
+    @staticmethod
+    def _paper_position_from_row(row: sqlite3.Row) -> PaperPositionRecord:
+        return PaperPositionRecord(
+            account_id=str(row["account_id"]),
+            security_key=str(row["security_key"]),
+            total_quantity=int(row["total_quantity"]),
+            available_to_sell=int(row["available_to_sell"]),
+            average_cost=Decimal(str(row["average_cost"])),
+        )
+
+    @staticmethod
+    def _decimal_text(value: Decimal) -> str:
+        return format(value, "f")
