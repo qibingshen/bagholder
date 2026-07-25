@@ -18,27 +18,40 @@ from typing import Any
 from pydantic import BaseModel
 
 from bagholder import __version__
-from bagholder.adapters.broker.registry import BrokerRegistry
+from bagholder.adapters.broker.broker_runtime_registry import (
+    BrokerRuntimeBinding,
+)
 from bagholder.application.execution_service import LiveBlockedError
 from bagholder.contracts.live_trading import ExecutionMode, OrderProposal
+from bagholder.domain.broker import BrokerCode
 from bagholder.domain.pipeline import PipelineRun
 from bagholder.runtime import PlatformRuntime, build_runtime
 
 
-def _status_payload() -> dict[str, Any]:
-    accounts = BrokerRegistry.default_accounts()
+def _status_payload(runtime: PlatformRuntime) -> dict[str, Any]:
     return {
         "project": "bagholder-trading-platform",
         "version": __version__,
-        "live_trading_enabled": False,
+        "live_trading_enabled": runtime.system_live_enabled,
+        "configuration_errors": [
+            {
+                "source_file": item.source_file,
+                "error_code": item.error_code,
+            }
+            for item in runtime.broker_registry.configuration_errors()
+        ],
         "accounts": [
             {
-                "account_id": account.account_id,
-                "broker": account.broker.value,
-                "api_state": account.api_state.value,
-                "supports_live_orders": account.capabilities.supports_live_orders,
+                "account_id": binding.config.account_id,
+                "broker": binding.config.broker_code.value,
+                "account_live_enabled": binding.account_live_enabled,
+                "api_state": binding.api_state.value,
+                "supports_live_orders": bool(
+                    binding.health.get("live_orders", False)
+                ),
+                "reason": binding.reason,
             }
-            for account in accounts
+            for binding in runtime.broker_registry.bindings()
         ],
     }
 
@@ -102,6 +115,10 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=[mode.value for mode in ExecutionMode],
         required=True,
     )
+    pipeline_approve.add_argument(
+        "--broker",
+        choices=[item.value for item in BrokerCode],
+    )
     pipeline_approve.add_argument("--confirm-live", action="store_true")
     pipeline_approve.add_argument("--json", action="store_true", dest="as_json")
     pipeline_show = pipeline_commands.add_parser("show")
@@ -121,14 +138,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "status":
-        return _emit(_status_payload(), args.as_json)
     if args.command == "doctor":
         return _emit(_doctor_payload(), args.as_json)
 
     try:
         runtime = build_runtime()
-        payload = _execute(args, runtime)
+        payload = (
+            _status_payload(runtime)
+            if args.command == "status"
+            else _execute(args, runtime)
+        )
     except Exception as error:
         return _emit_error(error, bool(getattr(args, "as_json", False)))
     return _emit(payload, bool(getattr(args, "as_json", False)))
@@ -192,14 +211,22 @@ def _execute(args: argparse.Namespace, runtime: PlatformRuntime) -> object:
         )
     if args.command == "pipeline" and args.pipeline_command == "approve":
         mode = ExecutionMode(args.mode)
+        _validate_broker_argument(mode, args.broker)
         run = runtime.pipeline.show(args.run_id)
         confirmed = False
         live_context = None
         if mode is ExecutionMode.LIVE:
-            confirmed = _confirm_live(args.confirm_live, runtime, run)
+            binding = runtime.broker_binding(run.account_id)
+            _validate_live_broker(str(args.broker), binding)
+            confirmed = _confirm_live(
+                args.confirm_live,
+                runtime,
+                run,
+                binding.config.broker_code,
+            )
             live_context = runtime.live_gate_context(
                 run.account_id,
-                interactive_confirmation=confirmed
+                interactive_confirmation=confirmed,
             )
         return runtime.pipeline.approve(
             run_id=args.run_id,
@@ -215,10 +242,39 @@ def _execute(args: argparse.Namespace, runtime: PlatformRuntime) -> object:
     raise ValueError("不支持的命令")
 
 
+def _validate_broker_argument(
+    mode: ExecutionMode,
+    requested_broker: str | None,
+) -> None:
+    if mode is ExecutionMode.PAPER and requested_broker is not None:
+        raise LiveBlockedError("BROKER_NOT_ALLOWED_FOR_PAPER")
+    if mode is ExecutionMode.LIVE and requested_broker is None:
+        raise LiveBlockedError("BROKER_CONFIRMATION_REQUIRED")
+
+
+def _validate_live_broker(
+    requested_broker: str,
+    binding: BrokerRuntimeBinding,
+) -> None:
+    if requested_broker != binding.config.broker_code.value:
+        raise LiveBlockedError("BROKER_ACCOUNT_MISMATCH")
+
+
+def _live_confirmation_text(
+    broker_code: BrokerCode,
+    proposal: OrderProposal,
+) -> str:
+    return (
+        f"{broker_code.value} {proposal.account_id} "
+        f"{proposal.security_key} {proposal.side.value} {proposal.quantity}"
+    )
+
+
 def _confirm_live(
     requested: bool,
     runtime: PlatformRuntime,
     run: PipelineRun,
+    broker_code: BrokerCode,
 ) -> bool:
     if not requested or not sys.stdin.isatty():
         raise LiveBlockedError("LIVE_CONFIRMATION_REQUIRED")
@@ -227,10 +283,7 @@ def _confirm_live(
     if not isinstance(proposal_id, str):
         raise RuntimeError("管道缺少订单提案")
     proposal = OrderProposal.model_validate(runtime.store.get_order_proposal(proposal_id))
-    expected = (
-        f"{proposal.account_id} {proposal.security_key} "
-        f"{proposal.side.value} {proposal.quantity}"
-    )
+    expected = _live_confirmation_text(broker_code, proposal)
     entered = input(f"请输入以下内容确认实盘订单：{expected}\n> ").strip()
     if entered != expected:
         raise LiveBlockedError("LIVE_CONFIRMATION_REQUIRED")
