@@ -105,6 +105,23 @@ def test_vnpy_gateway_资金查询转换为_decimal(tmp_path: Path) -> None:
     assert funds["cash_available"] == Decimal("1000000.00")
 
 
+def test_fake_gateway_暴露完整身份和能力(tmp_path: Path) -> None:
+    health = _gateway(tmp_path).health()
+
+    assert health["broker_code"] == "CITIC"
+    assert health["account_ids"] == ["citic-main"]
+    assert set(health["capabilities"]) == {
+        "live_orders",
+        "cancel",
+        "funds_query",
+        "positions_query",
+        "orders_query",
+        "trades_query",
+        "market_data",
+    }
+    assert health["test_plugin"] is True
+
+
 def test_受信插件摘要不匹配时拒绝加载(tmp_path: Path) -> None:
     from bagholder.integrations.vnpy_client import VnpyClient, VnpyNodeError
 

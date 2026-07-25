@@ -9,7 +9,24 @@ class FakeVnpyGateway:
     """实现私有 Gateway 插件需要提供的原始字典接口。"""
 
     def health(self) -> dict[str, object]:
-        return {"status": "READY", "live_orders": True, "test_plugin": True}
+        return {
+            "status": "READY",
+            "broker_code": "CITIC",
+            "account_ids": ["citic-main"],
+            "live_orders": True,
+            "capabilities": [
+                "live_orders",
+                "cancel",
+                "funds_query",
+                "positions_query",
+                "orders_query",
+                "trades_query",
+                "market_data",
+            ],
+            "reconciled": True,
+            "market_data_ready": True,
+            "test_plugin": True,
+        }
 
     def submit_order(self, request: dict[str, object]) -> dict[str, object]:
         proposal = request["proposal"]
@@ -54,4 +71,3 @@ def create_gateway() -> FakeVnpyGateway:
     """创建无外部状态的契约测试 Gateway。"""
 
     return FakeVnpyGateway()
-
