@@ -198,6 +198,7 @@ def _execute(args: argparse.Namespace, runtime: PlatformRuntime) -> object:
         if mode is ExecutionMode.LIVE:
             confirmed = _confirm_live(args.confirm_live, runtime, run)
             live_context = runtime.live_gate_context(
+                run.account_id,
                 interactive_confirmation=confirmed
             )
         return runtime.pipeline.approve(

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from bagholder.adapters.broker.vnpy_gateway import VnpyBrokerGateway
+from bagholder.adapters.broker.broker_config import BrokerConfigLoader
+from bagholder.adapters.broker.broker_runtime_registry import (
+    BrokerRuntimeBinding,
+    BrokerRuntimeRegistry,
+)
 from bagholder.application.approval_service import ApprovalService
 from bagholder.application.execution_service import (
+    AccountRoutedLiveExecutionService,
     ExecutionRouter,
     LiveBlockedError,
-    LiveExecutionService,
     LiveGateContext,
 )
 from bagholder.application.market_data_service import MarketDataService
@@ -22,28 +25,12 @@ from bagholder.application.pipeline_service import PipelineService
 from bagholder.application.research_service import ResearchService
 from bagholder.application.risk_service import LiveRiskService
 from bagholder.application.signal_to_order import SignalToOrderService
-from bagholder.contracts.live_trading import ExecutionRequest
 from bagholder.domain.broker import (
     BrokerApiState,
-    BrokerGateway,
-    BrokerOrderReceipt,
 )
 from bagholder.domain.risk import LiveRiskContext
 from bagholder.infrastructure.sqlite_store import SqlitePlatformStore
 from bagholder.integrations.tradingagents_client import TradingAgentsClient
-from bagholder.integrations.vnpy_client import SubprocessVnpyTransport, VnpyClient
-
-
-class UnavailableLiveExecutor:
-    """没有受信私有 Gateway 时的关闭默认实现。"""
-
-    def submit(
-        self,
-        request: ExecutionRequest,
-        now: datetime,
-    ) -> BrokerOrderReceipt:
-        del request, now
-        raise LiveBlockedError("BROKER_API_UNAVAILABLE")
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,25 +43,29 @@ class PlatformRuntime:
     research: ResearchService
     paper: PaperExecutionService
     pipeline: PipelineService
-    live_gateway: BrokerGateway | None
-    live_api_state: BrokerApiState
-    live_health: dict[str, object]
+    broker_registry: BrokerRuntimeRegistry
     system_live_enabled: bool
-    account_live_enabled: bool
+
+    def broker_binding(self, account_id: str) -> BrokerRuntimeBinding:
+        """返回指定账户唯一的运行时绑定。"""
+
+        return self.broker_registry.get(account_id)
 
     def live_gate_context(
         self,
+        account_id: str,
         *,
         interactive_confirmation: bool,
     ) -> LiveGateContext:
         """根据 Gateway 健康和本地开关生成实盘门事实。"""
 
+        binding = self.broker_binding(account_id)
         return LiveGateContext(
             system_live_enabled=self.system_live_enabled,
-            account_live_enabled=self.account_live_enabled,
-            broker_api_state=self.live_api_state,
-            supports_live_orders=bool(self.live_health.get("live_orders", False)),
-            reconciled=bool(self.live_health.get("reconciled", False)),
+            account_live_enabled=binding.account_live_enabled,
+            broker_api_state=binding.api_state,
+            supports_live_orders=bool(binding.health.get("live_orders", False)),
+            reconciled=bool(binding.health.get("reconciled", False)),
             interactive_confirmation=interactive_confirmation,
         )
 
@@ -135,12 +126,18 @@ class PlatformRuntime:
     ) -> LiveRiskContext:
         """从就绪的私有 Gateway 查询真实账户风控事实。"""
 
-        if self.live_gateway is None or self.live_api_state is not BrokerApiState.READY:
+        try:
+            binding = self.broker_binding(account_id)
+        except LookupError as error:
+            raise LiveBlockedError("BROKER_ACCOUNT_NOT_FOUND") from error
+        gateway = binding.gateway
+        health = binding.health
+        if gateway is None or binding.api_state is not BrokerApiState.READY:
             raise LiveBlockedError("BROKER_API_UNAVAILABLE")
-        if not bool(self.live_health.get("market_data_ready", False)):
+        if not bool(health.get("market_data_ready", False)):
             raise LiveBlockedError("BROKER_MARKET_DATA_UNAVAILABLE")
-        funds = self.live_gateway.query_funds(account_id)
-        positions = self.live_gateway.query_positions(account_id)
+        funds = gateway.query_funds(account_id)
+        positions = gateway.query_positions(account_id)
         net_asset = funds["net_asset"]
         cash = funds["cash_available"]
         total_market_value = Decimal("0")
@@ -154,30 +151,26 @@ class PlatformRuntime:
                 available_to_sell = int(str(position.get("available_to_sell", 0)))
         return LiveRiskContext(
             quote_age_seconds=Decimal(
-                str(self.live_health.get("quote_age_seconds", "999"))
+                str(health.get("quote_age_seconds", "999"))
             ),
-            reconciled=bool(self.live_health.get("reconciled", False)),
+            reconciled=bool(health.get("reconciled", False)),
             halted=False,
-            security_tradable=bool(
-                self.live_health.get("security_tradable", False)
-            ),
-            price_within_limit=bool(
-                self.live_health.get("price_within_limit", False)
-            ),
+            security_tradable=bool(health.get("security_tradable", False)),
+            price_within_limit=bool(health.get("price_within_limit", False)),
             cash_available=cash,
             available_to_sell=available_to_sell,
             net_asset=net_asset,
             current_total_exposure=total_market_value / net_asset,
             current_security_exposure=security_market_value / net_asset,
             current_industry_exposure=Decimal(
-                str(self.live_health.get("industry_exposure", "0"))
+                str(health.get("industry_exposure", "0"))
             ),
             daily_turnover=Decimal(
-                str(self.live_health.get("daily_turnover", "0"))
+                str(health.get("daily_turnover", "0"))
             ),
-            daily_pnl=Decimal(str(self.live_health.get("daily_pnl", "0"))),
+            daily_pnl=Decimal(str(health.get("daily_pnl", "0"))),
             peak_drawdown=Decimal(
-                str(self.live_health.get("peak_drawdown", "0"))
+                str(health.get("peak_drawdown", "0"))
             ),
         )
 
@@ -208,12 +201,19 @@ def build_runtime() -> PlatformRuntime:
     research = ResearchService(research_client, store)
     paper = PaperExecutionService(store)
 
-    gateway, api_state, health = _build_live_gateway(root, home)
-    live_executor = (
-        LiveExecutionService(store, gateway)
-        if gateway is not None and api_state is BrokerApiState.READY
-        else UnavailableLiveExecutor()
+    config_dir = Path(
+        os.getenv(
+            "BAGHOLDER_BROKER_CONFIG_DIR",
+            str(root / "config" / "brokers"),
+        )
+    ).resolve()
+    configuration = BrokerConfigLoader().load(config_dir)
+    registry = BrokerRuntimeRegistry.build(
+        configuration=configuration,
+        root=root,
+        home=home,
     )
+    live_executor = AccountRoutedLiveExecutionService(store, registry)
     pipeline = PipelineService(
         store=store,
         market_service=market,
@@ -230,54 +230,8 @@ def build_runtime() -> PlatformRuntime:
         research=research,
         paper=paper,
         pipeline=pipeline,
-        live_gateway=gateway,
-        live_api_state=api_state,
-        live_health=health,
+        broker_registry=registry,
         system_live_enabled=_env_true("BAGHOLDER_LIVE_ENABLED"),
-        account_live_enabled=_env_true("BAGHOLDER_ACCOUNT_LIVE_ENABLED"),
-    )
-
-
-def _build_live_gateway(
-    root: Path,
-    home: Path,
-) -> tuple[BrokerGateway | None, BrokerApiState, dict[str, object]]:
-    plugin = os.getenv("BAGHOLDER_VNPY_GATEWAY_PLUGIN", "").strip()
-    plugin_sha256 = os.getenv("BAGHOLDER_VNPY_GATEWAY_SHA256", "").strip()
-    secret_hex = os.getenv("BAGHOLDER_TRADING_NODE_SECRET_HEX", "").strip()
-    if not plugin or len(plugin_sha256) != 64 or not secret_hex:
-        return None, BrokerApiState.API_UNAVAILABLE, {}
-    try:
-        secret = bytes.fromhex(secret_hex)
-    except ValueError:
-        return None, BrokerApiState.API_UNAVAILABLE, {}
-    if len(secret) < 32:
-        return None, BrokerApiState.API_UNAVAILABLE, {}
-    transport = SubprocessVnpyTransport(
-        python_executable=os.getenv(
-            "BAGHOLDER_VNPY_PYTHON",
-            str(root / ".runtime" / "vnpy" / "Scripts" / "python.exe"),
-        ),
-        server_path=root / "integrations" / "vnpy" / "server.py",
-        gateway_plugin=plugin,
-        gateway_plugin_sha256=plugin_sha256,
-        nonce_store_path=home / "vnpy-nonces.sqlite3",
-        secret=secret,
-    )
-    gateway = VnpyBrokerGateway(VnpyClient(secret=secret, transport=transport))
-    try:
-        health = gateway.health()
-    except Exception:
-        return None, BrokerApiState.DISCONNECTED, {}
-    ready = (
-        health.get("status") == "READY"
-        and health.get("live_orders") is True
-        and health.get("test_plugin") is not True
-    )
-    return (
-        gateway,
-        BrokerApiState.READY if ready else BrokerApiState.API_UNAVAILABLE,
-        health,
     )
 
 

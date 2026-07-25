@@ -2,10 +2,15 @@
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from bagholder.contracts.live_trading import ExecutionMode, ExecutionRequest
 from bagholder.domain.broker import BrokerApiState, BrokerGateway, BrokerOrderReceipt
+
+if TYPE_CHECKING:
+    from bagholder.adapters.broker.broker_runtime_registry import (
+        BrokerRuntimeRegistry,
+    )
 
 
 class TradingRepository(Protocol):
@@ -120,3 +125,34 @@ class LiveExecutionService:
         receipt = self._gateway.submit(request)
         self._repository.save(request.idempotency_key, receipt)
         return receipt
+
+
+class AccountRoutedLiveExecutionService:
+    """按订单账户选择唯一真实 Gateway。"""
+
+    def __init__(
+        self,
+        repository: TradingRepository,
+        registry: "BrokerRuntimeRegistry",
+    ) -> None:
+        self._repository = repository
+        self._registry = registry
+
+    def submit(
+        self,
+        request: ExecutionRequest,
+        now: datetime,
+    ) -> BrokerOrderReceipt:
+        try:
+            binding = self._registry.get(request.proposal.account_id)
+        except LookupError as error:
+            raise LiveBlockedError("BROKER_ACCOUNT_NOT_FOUND") from error
+        if (
+            binding.api_state is not BrokerApiState.READY
+            or binding.gateway is None
+        ):
+            raise LiveBlockedError("BROKER_API_UNAVAILABLE")
+        return LiveExecutionService(
+            self._repository,
+            binding.gateway,
+        ).submit(request, now)
