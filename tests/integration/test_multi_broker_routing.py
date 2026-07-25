@@ -247,3 +247,24 @@ def test_runtime_按账户配置生成独立实盘门(
     assert binding.api_state is BrokerApiState.API_UNAVAILABLE
     assert gate.account_live_enabled is True
     assert gate.broker_api_state is BrokerApiState.API_UNAVAILABLE
+
+
+def test_runtime_未知账户返回稳定错误码(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import pytest
+
+    from bagholder.application.execution_service import LiveBlockedError
+    from bagholder.runtime import build_runtime
+
+    config_dir = tmp_path / "brokers"
+    config_dir.mkdir()
+    monkeypatch.setenv("BAGHOLDER_HOME", str(tmp_path / "runtime"))
+    monkeypatch.setenv("BAGHOLDER_BROKER_CONFIG_DIR", str(config_dir))
+    runtime = build_runtime()
+
+    with pytest.raises(LiveBlockedError) as captured:
+        runtime.broker_binding("missing-account")
+
+    assert captured.value.error_code == "BROKER_ACCOUNT_NOT_FOUND"

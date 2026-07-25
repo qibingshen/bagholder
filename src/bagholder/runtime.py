@@ -49,7 +49,10 @@ class PlatformRuntime:
     def broker_binding(self, account_id: str) -> BrokerRuntimeBinding:
         """返回指定账户唯一的运行时绑定。"""
 
-        return self.broker_registry.get(account_id)
+        try:
+            return self.broker_registry.get(account_id)
+        except LookupError as error:
+            raise LiveBlockedError("BROKER_ACCOUNT_NOT_FOUND") from error
 
     def live_gate_context(
         self,
@@ -126,10 +129,7 @@ class PlatformRuntime:
     ) -> LiveRiskContext:
         """从就绪的私有 Gateway 查询真实账户风控事实。"""
 
-        try:
-            binding = self.broker_binding(account_id)
-        except LookupError as error:
-            raise LiveBlockedError("BROKER_ACCOUNT_NOT_FOUND") from error
+        binding = self.broker_binding(account_id)
         gateway = binding.gateway
         health = binding.health
         if gateway is None or binding.api_state is not BrokerApiState.READY:

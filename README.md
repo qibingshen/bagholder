@@ -155,6 +155,13 @@ $env:BAGHOLDER_CITIC_MAIN_GATEWAY_PLUGIN = "bagholder_vnpy_citic:create_gateway"
 $env:BAGHOLDER_CITIC_MAIN_GATEWAY_SHA256 = "<受信插件 SHA-256>"
 $env:BAGHOLDER_CITIC_MAIN_TRADING_NODE_SECRET_HEX = "<系统凭据存储注入>"
 
+.\.venv\Scripts\bagholder.exe pipeline run CN:600519.SH `
+  --account citic-main `
+  --date 2026-07-24 `
+  --start 2026-07-01 `
+  --mode LIVE `
+  --json
+
 .\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
   --mode LIVE `
   --broker CITIC `
@@ -170,6 +177,13 @@ $env:BAGHOLDER_GUOTAI_HAITONG_MAIN_LIVE_ENABLED = "true"
 $env:BAGHOLDER_GUOTAI_HAITONG_MAIN_GATEWAY_PLUGIN = "bagholder_vnpy_guotai_haitong:create_gateway"
 $env:BAGHOLDER_GUOTAI_HAITONG_MAIN_GATEWAY_SHA256 = "<受信插件 SHA-256>"
 $env:BAGHOLDER_GUOTAI_HAITONG_MAIN_TRADING_NODE_SECRET_HEX = "<系统凭据存储注入>"
+
+.\.venv\Scripts\bagholder.exe pipeline run CN:600519.SH `
+  --account guotai-haitong-main `
+  --date 2026-07-24 `
+  --start 2026-07-01 `
+  --mode LIVE `
+  --json
 
 .\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
   --mode LIVE `
