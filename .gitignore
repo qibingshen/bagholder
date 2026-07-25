@@ -20,3 +20,4 @@ secrets/
 .runtime/
 var/
 .superpowers/
+.worktrees/
