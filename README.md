@@ -145,23 +145,42 @@ API Key 不得写入仓库、命令参数、SQLite、证据文件或日志。
 → 真实委托、撤单、订单和成交回报
 ```
 
-正式接入后使用：
+两个券商账户使用独立配置，可同时装配，也会独立失败：一个账户的插件缺失、
+健康检查失败或账户开关关闭，不会回退到另一个券商账户。中信证券接入示例：
 
 ```powershell
 $env:BAGHOLDER_LIVE_ENABLED = "true"
-$env:BAGHOLDER_ACCOUNT_LIVE_ENABLED = "true"
-$env:BAGHOLDER_VNPY_GATEWAY_PLUGIN = "bagholder_vnpy_citic:create_gateway"
-$env:BAGHOLDER_VNPY_GATEWAY_SHA256 = "<受信 Gateway 插件文件的 SHA-256>"
-$env:BAGHOLDER_TRADING_NODE_SECRET_HEX = "<从系统凭据存储读取>"
+$env:BAGHOLDER_CITIC_MAIN_LIVE_ENABLED = "true"
+$env:BAGHOLDER_CITIC_MAIN_GATEWAY_PLUGIN = "bagholder_vnpy_citic:create_gateway"
+$env:BAGHOLDER_CITIC_MAIN_GATEWAY_SHA256 = "<受信插件 SHA-256>"
+$env:BAGHOLDER_CITIC_MAIN_TRADING_NODE_SECRET_HEX = "<系统凭据存储注入>"
 
 .\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
   --mode LIVE `
+  --broker CITIC `
   --confirm-live `
   --json
 ```
 
-CLI 会要求再次输入完整账户、证券、方向和数量。非交互环境、确认不匹配、对账未完成、
-行情不新鲜或 Gateway 不可用时都拒绝发单。LIVE 失败绝不自动转成 PAPER。
+国泰海通使用对应的账户级变量：
+
+```powershell
+$env:BAGHOLDER_LIVE_ENABLED = "true"
+$env:BAGHOLDER_GUOTAI_HAITONG_MAIN_LIVE_ENABLED = "true"
+$env:BAGHOLDER_GUOTAI_HAITONG_MAIN_GATEWAY_PLUGIN = "bagholder_vnpy_guotai_haitong:create_gateway"
+$env:BAGHOLDER_GUOTAI_HAITONG_MAIN_GATEWAY_SHA256 = "<受信插件 SHA-256>"
+$env:BAGHOLDER_GUOTAI_HAITONG_MAIN_TRADING_NODE_SECRET_HEX = "<系统凭据存储注入>"
+
+.\.venv\Scripts\bagholder.exe pipeline approve <运行ID> `
+  --mode LIVE `
+  --broker GUOTAI_HAITONG `
+  --confirm-live `
+  --json
+```
+
+CLI 会先验证 `--broker` 与运行所属账户一致，再要求输入券商、账户、证券、方向和数量。
+非交互环境、确认不匹配、对账未完成、行情不新鲜或 Gateway 不可用时都拒绝发单。
+LIVE 失败绝不自动转成 PAPER，也绝不改投另一个券商账户。
 
 当前仓库没有中信证券或国泰海通的私有 SDK，因此两家账户继续显示
 `API_UNAVAILABLE`。要真正发送生产订单，必须分别取得：

@@ -2,14 +2,15 @@
   "account_id": "citic-main",
   "broker_code": "CITIC",
   "display_name": "中信证券",
-  "execution_mode": "LIVE",
-  "api_state": "API_UNAVAILABLE",
+  "currency": "CNY",
+  "environment_prefix": "BAGHOLDER_CITIC_MAIN",
   "required_capabilities": [
     "live_orders",
     "cancel",
     "funds_query",
     "positions_query",
     "orders_query",
-    "trades_query"
+    "trades_query",
+    "market_data"
   ]
 }

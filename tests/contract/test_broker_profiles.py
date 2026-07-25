@@ -1,15 +1,25 @@
-def test_默认注册中信与国泰海通且都不可交易() -> None:
-    from bagholder.adapters.broker.registry import BrokerRegistry
-    from bagholder.domain.broker import BrokerApiState, BrokerCode
+from pathlib import Path
 
-    accounts = BrokerRegistry.default_accounts()
 
-    assert {account.broker for account in accounts} == {
-        BrokerCode.CITIC,
-        BrokerCode.GUOTAI_HAITONG,
+def test_仓库默认券商配置可被统一加载() -> None:
+    from bagholder.adapters.broker.broker_config import BrokerConfigLoader
+    from bagholder.domain.broker import BrokerCode
+
+    root = Path(__file__).parents[2]
+    result = BrokerConfigLoader().load(root / "config" / "brokers")
+
+    assert result.errors == ()
+    assert {
+        (item.account_id, item.broker_code, item.environment_prefix)
+        for item in result.accounts
+    } == {
+        ("citic-main", BrokerCode.CITIC, "BAGHOLDER_CITIC_MAIN"),
+        (
+            "guotai-haitong-main",
+            BrokerCode.GUOTAI_HAITONG,
+            "BAGHOLDER_GUOTAI_HAITONG_MAIN",
+        ),
     }
-    assert all(account.api_state is BrokerApiState.API_UNAVAILABLE for account in accounts)
-    assert all(not account.capabilities.supports_live_orders for account in accounts)
 
 
 def test_没有受信插件不能绑定为可交易账户() -> None:
