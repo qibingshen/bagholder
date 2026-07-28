@@ -61,6 +61,25 @@ $env:TRADINGAGENTS_BACKEND_URL = "https://example.com/v1"
 
 API Key 不得写入仓库、命令参数、SQLite、证据文件或日志。
 
+## 轻量研究模式
+
+`TRADINGAGENTS_RESEARCH_MODE=FULL` 保持完整多智能体研究图。设置为
+`LIGHTWEIGHT` 时，研究只依次运行行情分析、基本面分析和一次风险结论调用，
+输出 `market_report`、`fundamentals_report` 与 `risk_report` 三份报告。
+
+轻量模式仍然只生成研究证据和 `ResearchDecision`；不会创建订单、模拟成交或实盘请求。
+
+## 外部数据缓存
+
+完整研究与轻量研究共用 `TRADINGAGENTS_CACHE_DIR/external-data/cache.sqlite3` 中的
+SQLite 缓存。日线、技术指标和财务数据默认有效 24 小时；机构预期和行业比较有效
+1 小时。数据源暂时不可用时，系统只会回退到已校验的历史缓存，并在风险标记中写明
+`外部数据过期回退：<工具名>`。
+
+默认设置为 `TRADINGAGENTS_EXTERNAL_DATA_CACHE_BACKEND=sqlite`。缓存存储已抽象为
+统一接口，未来可以接 PostgreSQL 或 MySQL；当前版本不会读取任何 PostgreSQL/MySQL
+连接配置，也不会缓存模型提示词、密钥、模型结果、交易订单或平台证据。
+
 ## 获取真实行情
 
 ```powershell

@@ -196,6 +196,7 @@ def build_runtime() -> PlatformRuntime:
     research_client = TradingAgentsClient(
         python_executable=tradingagents_python,
         runner_path=tradingagents_runner,
+        timeout_seconds=_tradingagents_timeout_seconds(),
     )
     market = MarketDataService(research_client, store)
     research = ResearchService(research_client, store)
@@ -237,3 +238,14 @@ def build_runtime() -> PlatformRuntime:
 
 def _env_true(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tradingagents_timeout_seconds() -> float:
+    """允许长时间多智能体研究覆盖默认子进程超时。"""
+
+    value = os.getenv("TRADINGAGENTS_TIMEOUT_SECONDS", "120").strip()
+    try:
+        timeout = float(value)
+    except ValueError:
+        return 120
+    return timeout if timeout > 0 else 120

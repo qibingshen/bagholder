@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -99,6 +100,28 @@ def _write_broker_configs(tmp_path: Path) -> Path:
             encoding="utf-8",
         )
     return directory
+
+
+def test_project_env_populates_missing_values(monkeypatch, tmp_path: Path) -> None:
+    from bagholder.bootstrap import _load_project_env
+
+    (tmp_path / ".env").write_text("TRADINGAGENTS_MODEL=local-model\n", encoding="utf-8")
+    monkeypatch.delenv("TRADINGAGENTS_MODEL", raising=False)
+
+    _load_project_env(tmp_path)
+
+    assert os.environ["TRADINGAGENTS_MODEL"] == "local-model"
+
+
+def test_project_env_does_not_override_process_values(monkeypatch, tmp_path: Path) -> None:
+    from bagholder.bootstrap import _load_project_env
+
+    (tmp_path / ".env").write_text("TRADINGAGENTS_MODEL=local-model\n", encoding="utf-8")
+    monkeypatch.setenv("TRADINGAGENTS_MODEL", "system-model")
+
+    _load_project_env(tmp_path)
+
+    assert os.environ["TRADINGAGENTS_MODEL"] == "system-model"
 
 
 def test_status_显示真实总开关和账户开关(

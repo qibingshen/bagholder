@@ -133,9 +133,34 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_project_env(project_root: Path) -> None:
+    """从被 Git 忽略的项目根目录 .env 补充未设置的环境变量。"""
+
+    env_file = project_root / ".env"
+    if not env_file.is_file():
+        return
+    for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", maxsplit=1)
+        key = key.strip()
+        if not key:
+            continue
+        normalized_value = value.strip()
+        if (
+            len(normalized_value) >= 2
+            and normalized_value[0] == normalized_value[-1]
+            and normalized_value[0] in {"\"", "'"}
+        ):
+            normalized_value = normalized_value[1:-1]
+        os.environ.setdefault(key, normalized_value)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """执行一条 CLI 命令并返回进程退出码。"""
 
+    _load_project_env(Path.cwd())
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "doctor":

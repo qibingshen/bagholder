@@ -46,10 +46,9 @@ class TradingAgentsClient:
         try:
             completed = subprocess.run(
                 self._command,
-                input=json.dumps(payload, ensure_ascii=False) + "\n",
+                input=(json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"),
                 capture_output=True,
-                text=True,
-                encoding="utf-8",
+                text=False,
                 timeout=self._timeout_seconds,
                 check=False,
                 env=self._safe_environment(),
@@ -57,7 +56,11 @@ class TradingAgentsClient:
         except subprocess.TimeoutExpired as error:
             raise TimeoutError("TradingAgents 子进程超时") from error
 
-        lines = [line for line in completed.stdout.splitlines() if line.strip()]
+        try:
+            stdout = completed.stdout.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise TradingAgentsProtocolError("TradingAgents 标准输出不是 UTF-8") from error
+        lines = [line for line in stdout.splitlines() if line.strip()]
         if completed.returncode != 0:
             raise TradingAgentsProcessError("TRADINGAGENTS_PROCESS_FAILED")
         if len(lines) != 1:
@@ -119,8 +122,11 @@ class TradingAgentsClient:
             "TRADINGAGENTS_API_KEY",
             "TRADINGAGENTS_BACKEND_URL",
             "TRADINGAGENTS_CACHE_DIR",
+            "TRADINGAGENTS_EXTERNAL_DATA_CACHE_BACKEND",
+            "TRADINGAGENTS_EXTERNAL_DATA_CACHE_VENDOR_VERSION",
             "TRADINGAGENTS_LLM_PROVIDER",
             "TRADINGAGENTS_MODEL",
+            "TRADINGAGENTS_RESEARCH_MODE",
             "TRADINGAGENTS_RESULTS_DIR",
         }
         return {key: value for key, value in os.environ.items() if key.upper() in allowed}
